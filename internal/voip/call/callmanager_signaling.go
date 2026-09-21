@@ -1,0 +1,397 @@
+package call
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"strings"
+	"time"
+	"wacallerapi/internal/voip/core"
+	"wacallerapi/internal/voip/media"
+	"wacallerapi/internal/voip/signaling"
+	"wacallerapi/internal/voip/wanode"
+
+	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/types"
+)
+
+func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, peerJid types.JID) {
+	m.log.Info("offer raw node", "xml", node.String())
+	info := signaling.ExtractNodeInfo(node)
+	if info == nil {
+		return
+	}
+	callID := info.CallID
+	creator := wanode.AttrString(info.InnerNode.Attrs, "call-creator")
+	if creator == "" {
+		creator = peerJid.String()
+	}
+	isVideo := hasChildTag(info.InnerNode, "video")
+
+	callKey, err := signaling.DecryptCallKeyInNode(ctx, m.sock, info.InnerNode, peerJid)
+	if err != nil {
+		m.log.Error("offer decrypt call key", "err", err)
+	}
+	relays := signaling.ExtractRelayEndpoints(info.InnerNode)
+	var structured *signaling.ParsedRelayAck
+	if len(relays) == 0 {
+		// The offer may carry relays in the structured <relay><te2> form (the
+		// same encoding acks use) rather than as <relay ip=.. token=..>
+		// attributes. ExtractRelayEndpoints only reads the attribute form, so
+		// fall back to the structured parser before giving up.
+		if parsed := signaling.ParseRelayFromAck(info.InnerNode); len(parsed.Relays) > 0 {
+			relays = parsed.Relays
+			structured = &parsed
+			m.log.Info("offer relays parsed via structured (te2) format", "call_id", callID, "relays", len(relays))
+		}
+	}
+	// Diagnostic: show the offer's child structure so we can see whether relays
+	// are present (and in which form) or genuinely arrive later.
+	m.log.Debug("offer inner node structure", "call_id", callID, "children", childTagSummary(info.InnerNode))
+
+	mediaType := core.CallMediaTypeAudio
+	if isVideo {
+		mediaType = core.CallMediaTypeVideo
+	}
+
+	m.mu.Lock()
+	// If there's a previous call that has already ended but media wasn't fully torn down,
+	// clean it up before wiring the new call to avoid stale relay/keepalive interference.
+	if m.currentCall != nil && m.currentCall.IsEnded() {
+		m.mu.Unlock()
+		m.cleanupMedia()
+		m.mu.Lock()
+	}
+	call := NewIncomingCall(callID, peerJid.String(), creator, "", mediaType)
+	if callKey != nil {
+		call.EncryptionKey = callKey
+		call.PeerEncryptionKey = callKey
+	} else {
+		ourKey := make([]byte, 32)
+		rand.Read(ourKey)
+		call.EncryptionKey = ourKey
+	}
+	if len(relays) > 0 {
+		rd := &core.RelayData{Endpoints: relays}
+		if structured != nil {
+			// Carry the full structured data so SRTP/SSRC setup has participants.
+			rd.ParticipantJids = structured.ParticipantJids
+			rd.UUID = structured.UUID
+			rd.SelfPid = structured.SelfPid
+			rd.PeerPid = structured.PeerPid
+			rd.HbhKey = structured.HbhKey
+		}
+		call.RelayData = rd
+	}
+	m.currentCall = call
+	m.initialTransportSent = false
+
+	selfJid := m.sock.OwnLID()
+	sj := selfJid.String()
+	if selfJid.IsEmpty() {
+		sj = m.sock.OwnPN().String()
+	}
+	m.selfSsrc = media.GenerateSecureSsrc(callID, sj, 0)
+	m.rtpSession = media.NewWhatsAppOpusSession(m.selfSsrc)
+	m.peerSsrcs = []uint32{media.GenerateSecureSsrc(callID, ensureDeviceJid(peerJid.String()), 0)}
+	m.initCodec()
+	m.mu.Unlock()
+
+	offerMsgID := wanode.AttrString(node.Attrs, "id")
+	if offerMsgID == "" && info.InnerNode != nil {
+		offerMsgID = wanode.AttrString(info.InnerNode.Attrs, "id")
+	}
+	if offerMsgID != "" {
+		_ = m.sock.SendNode(ctx, waBinary.Node{
+			Tag:   "receipt",
+			Attrs: waBinary.Attrs{"id": offerMsgID, "to": peerJid, "type": "offer", "t": fmt.Sprintf("%d", time.Now().Unix())},
+		})
+	}
+
+	creatorJid := wanode.MustJID(creator)
+
+	// Send preaccept via Query (not SendNode) so we capture the ack response.
+	// When the offer arrives WITHOUT embedded relay endpoints (which happens
+	// when WhatsApp's server hasn't pre-allocated relays), the ack to our
+	// preaccept is the only place relay info is delivered.
+	preacceptNode := signaling.BuildPreacceptStanza(peerJid, callID, creatorJid)
+	go func() {
+		ackNode, err := m.sock.Query(ctx, preacceptNode)
+		if err != nil {
+			m.log.Warn("preaccept query error", "err", err, "call_id", callID)
+			return
+		}
+		if ackNode == nil {
+			return
+		}
+		m.log.Info("preaccept ack received", "call_id", callID, "xml", ackNode.String())
+		m.handlePreacceptAck(ctx, callID, ackNode)
+	}()
+
+	if len(relays) > 0 && call.RelayData != nil {
+		m.setupIncomingMedia(call, call.RelayData)
+		m.connectRelays(relays)
+	}
+
+	if m.OnIncoming != nil {
+		m.OnIncoming(call)
+	}
+	m.mu.Lock()
+	m.emitState()
+	m.mu.Unlock()
+	m.log.Info("incoming call ringing", "call_id", callID, "peer", peerJid.String(), "video", isVideo, "relays", len(relays))
+}
+
+// handlePreacceptAck processes the relay endpoints from the preaccept ack,
+// mirroring HandleCallAck for outbound calls.
+func (m *CallManager) handlePreacceptAck(ctx context.Context, callID string, ackNode *waBinary.Node) {
+	parsed := signaling.ParseRelayFromAck(ackNode)
+	m.log.Info("preaccept ack parsed", "call_id", callID, "relays", len(parsed.Relays), "participants", len(parsed.ParticipantJids))
+	if len(parsed.Relays) == 0 {
+		return
+	}
+
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || call.CallID != callID {
+		m.mu.Unlock()
+		return
+	}
+	// Only set relay data if we don't already have it (offer might have included relays)
+	if call.RelayData != nil && len(call.RelayData.Endpoints) > 0 && m.relay.HasConnection() {
+		m.mu.Unlock()
+		m.log.Info("preaccept ack relays ignored — already connected via offer relays", "call_id", callID)
+		return
+	}
+	call.RelayData = &core.RelayData{
+		Endpoints:       parsed.Relays,
+		ParticipantJids: parsed.ParticipantJids,
+		UUID:            parsed.UUID,
+		SelfPid:         parsed.SelfPid,
+		PeerPid:         parsed.PeerPid,
+		HbhKey:          parsed.HbhKey,
+	}
+	m.mu.Unlock()
+
+	m.setupIncomingMedia(call, call.RelayData)
+	m.connectRelays(parsed.Relays)
+	m.log.Info("relay endpoints connected from preaccept ack", "call_id", callID, "relays", len(parsed.Relays))
+}
+
+func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node, peerJid types.JID) {
+
+	m.mu.Lock()
+	call := m.currentCall
+	m.mu.Unlock()
+	if call == nil {
+		return
+	}
+	info := signaling.ExtractNodeInfo(node)
+	if info == nil {
+		return
+	}
+
+	if signaling.NeedsDecryption(info.Tag) {
+		if peerKey, err := signaling.DecryptCallKeyInNode(ctx, m.sock, info.InnerNode, peerJid); err == nil && peerKey != nil {
+			m.mu.Lock()
+			call.PeerEncryptionKey = peerKey
+			if call.EncryptionKey != nil && !equalBytes(call.EncryptionKey, peerKey) {
+				m.reinitSrtpLocked(peerKey, peerJid)
+			}
+			m.mu.Unlock()
+		}
+	}
+
+	m.mu.Lock()
+	_ = call.ApplyTransition(Transition{Type: TransitionRemoteAccepted})
+	m.emitState()
+	m.acceptedByJid = peerJid.String()
+	if m.peerSsrcs == nil || !m.actualPeerSet {
+		peerDeviceJid := ensureDeviceJid(peerJid.String())
+		m.peerSsrcs = []uint32{media.GenerateSecureSsrc(call.CallID, peerDeviceJid, 0)}
+	}
+	m.relay.SetSubscriptionSsrc(firstSsrc(m.peerSsrcs))
+	m.initSrtpKeysLocked()
+	hasConn := m.relay.HasConnection()
+	relayData := call.RelayData
+	m.mu.Unlock()
+
+	m.log.Info("remote accepted call", "call_id", call.CallID, "peer", peerJid.String(),
+		"relay_connected", hasConn, "relay_endpoints", relayEndpointCount(relayData))
+
+	m.relay.ResendSubscriptions()
+
+	callID := call.CallID
+	creator := wanode.MustJID(call.CallCreator)
+	transport := waBinary.Node{
+		Tag:   "call",
+		Attrs: waBinary.Attrs{"to": peerJid, "id": signaling.GenerateCallStanzaID()},
+		Content: []waBinary.Node{{
+			Tag: "transport",
+			Attrs: waBinary.Attrs{
+				"call-id": callID, "call-creator": creator,
+				"transport-message-type": "1", "p2p-cand-round": "1",
+			},
+			Content: []waBinary.Node{{Tag: "net", Attrs: waBinary.Attrs{"medium": "2", "protocol": "0"}}},
+		}},
+	}
+	_ = m.sock.SendNode(ctx, transport)
+	_ = m.sock.SendNode(ctx, signaling.BuildMuteV2Stanza(peerJid, callID, creator, 0))
+	if acceptMsgID := wanode.AttrString(node.Attrs, "id"); acceptMsgID != "" {
+		ourJid := m.sock.OwnLID()
+		if ourJid.IsEmpty() {
+			ourJid = m.sock.OwnPN()
+		}
+		_ = m.sock.SendNode(ctx, signaling.BuildAcceptReceiptStanza(peerJid, acceptMsgID, callID, creator, ourJid))
+	}
+
+	if hasConn {
+		m.mu.Lock()
+		if err := call.ApplyTransition(Transition{Type: TransitionMediaConnected}); err == nil {
+			m.emitState()
+			m.startSilenceKeepaliveLocked()
+			m.log.Info("call ACTIVE (media path established)", "call_id", call.CallID, "audio", m.codec != nil)
+		}
+		m.mu.Unlock()
+	} else if relayData != nil {
+		m.connectRelays(relayData.Endpoints)
+	}
+}
+
+func (m *CallManager) HandleCallTransport(ctx context.Context, node *waBinary.Node, peerJid types.JID) {
+	m.mu.Lock()
+	call := m.currentCall
+	m.mu.Unlock()
+	if call == nil {
+		return
+	}
+	info := signaling.ExtractNodeInfo(node)
+	if info == nil {
+		return
+	}
+	relays := signaling.ExtractRelayEndpoints(info.InnerNode)
+	m.log.Info("call transport received", "call_id", call.CallID,
+		"relays", len(relays), "already_connected", m.relay.HasConnection())
+	if len(relays) > 0 && !m.relay.HasConnection() {
+		m.mu.Lock()
+		if call.RelayData == nil {
+			call.RelayData = &core.RelayData{}
+		}
+		call.RelayData.Endpoints = relays
+		m.mu.Unlock()
+		m.connectRelays(relays)
+	}
+
+	creator := wanode.MustJID(call.CallCreator)
+	reply := signaling.BuildTransportReplyStanza(peerJid, call.CallID, creator)
+	if err := m.sock.SendNode(ctx, reply); err != nil {
+		m.log.Warn("transport reply error", "call_id", call.CallID, "err", err)
+	} else {
+		m.log.Info("sent transport reply (type 9)", "call_id", call.CallID, "to", peerJid.String())
+	}
+}
+
+func (m *CallManager) HandleCallAck(ctx context.Context, node *waBinary.Node) {
+	if t := wanode.AttrString(node.Attrs, "type"); t != "offer" {
+		return
+	}
+	if e := wanode.AttrString(node.Attrs, "error"); e != "" {
+		m.log.Error("offer ack error", "error", e)
+		return
+	}
+	parsed := signaling.ParseRelayFromAck(node)
+	m.log.Info("offer ack received", "relays", len(parsed.Relays), "participants", len(parsed.ParticipantJids))
+	if len(parsed.Relays) == 0 {
+		return
+	}
+
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil {
+		m.mu.Unlock()
+		return
+	}
+	call.RelayData = &core.RelayData{
+		Endpoints:       parsed.Relays,
+		ParticipantJids: parsed.ParticipantJids,
+		UUID:            parsed.UUID,
+		SelfPid:         parsed.SelfPid,
+		PeerPid:         parsed.PeerPid,
+		HbhKey:          parsed.HbhKey,
+	}
+
+	ourBase := wanode.CleanJID(m.ownCredJid())
+	if len(parsed.ParticipantJids) > 0 {
+		ourDeviceJid := ensureDeviceJid(findOurDevice(parsed.ParticipantJids, ourBase, m.ownCredJid()))
+		newSelf := media.GenerateSecureSsrc(call.CallID, ourDeviceJid, 0)
+		if newSelf != m.selfSsrc {
+			m.selfSsrc = newSelf
+			m.rtpSession = media.NewWhatsAppOpusSession(newSelf)
+		}
+		if peer := firstPeerDevice(parsed.ParticipantJids, ourBase); peer != "" {
+			m.peerSsrcs = []uint32{media.GenerateSecureSsrc(call.CallID, ensureDeviceJid(peer), 0)}
+		}
+		if call.EncryptionKey != nil {
+			m.initSrtpKeysLocked()
+		}
+	}
+	isInitiator := call.IsInitiator()
+	peer := wanode.MustJID(call.PeerJid)
+	callID := call.CallID
+	creator := wanode.MustJID(call.CallCreator)
+	sendPreaccept := isInitiator && !m.outgoingPreacceptSent
+	if sendPreaccept {
+		m.outgoingPreacceptSent = true
+	}
+	endpoints := parsed.Relays
+	m.mu.Unlock()
+
+	if sendPreaccept {
+		_ = m.sock.SendNode(ctx, signaling.BuildPreacceptStanza(peer, callID, creator))
+	}
+	m.connectRelays(endpoints)
+}
+
+func (m *CallManager) HandleCallTerminate(node *waBinary.Node, from types.JID) {
+	m.log.Info("terminate raw node", "from", from.String(), "xml", node.String())
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil {
+		m.mu.Unlock()
+		return
+	}
+
+	fromStr := from.String()
+	ourLid := m.sock.OwnLID()
+	ourPn := m.sock.OwnPN()
+
+	// Ignore rejections/terminations from hosted devices (:99@hosted.lid) or other companion devices of our own account
+	if from.Server == "hosted.lid" || strings.HasSuffix(fromStr, "@hosted.lid") {
+		m.log.Info("ignoring call terminate/reject from hosted device", "from", fromStr, "call_id", call.CallID)
+		m.mu.Unlock()
+		return
+	}
+	if (ourLid.User != "" && from.User == ourLid.User) || (ourPn.User != "" && from.User == ourPn.User) {
+		m.log.Info("ignoring call terminate/reject from own account companion device", "from", fromStr, "call_id", call.CallID)
+		m.mu.Unlock()
+		return
+	}
+
+	info := signaling.ExtractNodeInfo(node)
+	reason := core.EndCallReasonUserEnded
+	if info != nil {
+		if r := wanode.AttrString(info.InnerNode.Attrs, "reason"); r != "" {
+			reason = core.EndCallReason(r)
+		}
+	}
+	m.log.Info("call terminated by peer", "call_id", call.CallID, "reason", string(reason))
+	_ = call.ApplyTransition(Transition{Type: TransitionTerminated, Reason: reason})
+	ended := call
+	m.emitState()
+	m.mu.Unlock()
+
+	if m.OnEnded != nil {
+		m.OnEnded(ended)
+	}
+	m.cleanupMedia()
+}

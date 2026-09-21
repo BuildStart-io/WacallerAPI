@@ -1,0 +1,36 @@
+# Binaries
+/wacaller
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Environment variables & secrets
+.env
+*.env.local
+
+# SQLite Database & Write-Ahead Logs
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE / Editor folders
+.idea/
+.vscode/
+*.swp
+*~
