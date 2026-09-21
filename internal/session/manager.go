@@ -43,7 +43,7 @@ func NewSessionManager(ctx context.Context, container *sqlstore.Container, st *s
 	}
 }
 
-func (m *SessionManager) CreateSession(ctx context.Context, name, webhookURL string) (*Session, error) {
+func (m *SessionManager) CreateSession(ctx context.Context, name, webhookURL, userID string) (*Session, error) {
 	id := newSessionID()
 	if name == "" {
 		name = "WhatsApp Account"
@@ -53,13 +53,13 @@ func (m *SessionManager) CreateSession(ctx context.Context, name, webhookURL str
 	device := m.container.NewDevice()
 	client := whatsmeow.NewClient(device, waLog.Stdout("WA", "INFO", true))
 
-	sess := newSession(id, name, apiKey, client, m.store, m.dispatcher, m.log, m.maxCalls, webhookURL)
+	sess := newSession(id, name, apiKey, client, m.store, m.dispatcher, m.log, m.maxCalls, webhookURL, userID)
 
 	m.mu.Lock()
 	m.sessions[id] = sess
 	m.mu.Unlock()
 
-	if err := m.store.UpsertSession(ctx, id, name, "", string(StatusDisconnected), webhookURL, apiKey); err != nil {
+	if err := m.store.UpsertSession(ctx, id, name, "", string(StatusDisconnected), webhookURL, apiKey, userID); err != nil {
 		return nil, err
 	}
 
@@ -116,6 +116,19 @@ func (m *SessionManager) ListSessions() []SessionInfo {
 	out := make([]SessionInfo, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		out = append(out, s.Info())
+	}
+	return out
+}
+
+func (m *SessionManager) ListSessionsByUser(userID string) []SessionInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]SessionInfo, 0)
+	for _, s := range m.sessions {
+		if s.userID == userID || (userID == "" && s.userID == "") {
+			out = append(out, s.Info())
+		}
 	}
 	return out
 }
@@ -178,11 +191,11 @@ func (m *SessionManager) Restore(ctx context.Context) error {
 		apiKey := rec.APIKey
 		if apiKey == "" {
 			apiKey = "wac_sess_" + newSessionID()
-			_ = m.store.UpsertSession(ctx, rec.ID, rec.Name, rec.JID, rec.Status, rec.WebhookURL, apiKey)
+			_ = m.store.UpsertSession(ctx, rec.ID, rec.Name, rec.JID, rec.Status, rec.WebhookURL, apiKey, rec.UserID)
 		}
 
 		client := whatsmeow.NewClient(waDevice, waLog.Stdout("WA", "INFO", true))
-		sess := newSession(rec.ID, rec.Name, apiKey, client, m.store, m.dispatcher, m.log, m.maxCalls, rec.WebhookURL)
+		sess := newSession(rec.ID, rec.Name, apiKey, client, m.store, m.dispatcher, m.log, m.maxCalls, rec.WebhookURL, rec.UserID)
 
 		m.mu.Lock()
 		m.sessions[rec.ID] = sess

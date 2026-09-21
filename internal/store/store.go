@@ -43,6 +43,7 @@ type UserWithSubscription struct {
 
 type APIKey struct {
 	ID         string     `json:"id"`
+	UserID     string     `json:"user_id,omitempty"`
 	Key        string     `json:"key,omitempty"` // only shown on creation
 	KeyHash    string     `json:"-"`
 	Name       string     `json:"name"`
@@ -54,6 +55,7 @@ type APIKey struct {
 type SessionRecord struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
+	UserID     string    `json:"user_id,omitempty"`
 	JID        string    `json:"jid"`
 	Status     string    `json:"status"`
 	WebhookURL string    `json:"webhook_url,omitempty"`
@@ -96,25 +98,6 @@ type WebhookLogRecord struct {
 	Payload    string    `json:"payload"`
 	Error      string    `json:"error,omitempty"`
 	Timestamp  time.Time `json:"timestamp"`
-}
-
-func Open(ctx context.Context, path string) (*Store, error) {
-	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", path))
-	if err != nil {
-		return nil, err
-	}
-
-	s := &Store{db: db}
-	if err := s.migrate(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-
-	return s, nil
-}
-
-func (s *Store) Close() error {
-	return s.db.Close()
 }
 
 func (s *Store) DB() *sql.DB {
@@ -210,7 +193,6 @@ func (s *Store) migrate(ctx context.Context) error {
 
 	for _, q := range queries {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
-			// If index on api_key failed because column doesn't exist yet, alter table and retry
 			if strings.Contains(err.Error(), "no such column: api_key") {
 				_, _ = s.db.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN api_key TEXT;")
 				if _, retryErr := s.db.ExecContext(ctx, q); retryErr != nil {
@@ -222,6 +204,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	_, _ = s.db.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN api_key TEXT;")
+	_, _ = s.db.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN user_id TEXT;")
+	_, _ = s.db.ExecContext(ctx, "ALTER TABLE api_keys ADD COLUMN user_id TEXT;")
 	_, _ = s.db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'developer';")
 	_, _ = s.db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN trial_ends_at DATETIME;")
 
@@ -259,38 +243,28 @@ func (s *Store) CreateUser(ctx context.Context, name, email, rawPassword string)
 	if _, err := rand.Read(rawBytes); err != nil {
 		return nil, err
 	}
+	pat := "wac_pat_" + hex.EncodeToString(rawBytes)
 	userID := "usr_" + hex.EncodeToString(rawBytes[:8])
-	patToken := "wac_pat_" + hex.EncodeToString(rawBytes)
 	pwdHash := hashKey(rawPassword)
 	now := time.Now().UTC()
-	trialEndsAt := now.Add(7 * 24 * time.Hour) // 7-day free trial like WasenderAPI
-	role := "developer"
-
-	if strings.Contains(strings.ToLower(email), "admin") || strings.EqualFold(email, "yasirubandaraprivate@gmail.com") {
-		role = "superadmin"
-		trialEndsAt = now.Add(365 * 24 * time.Hour)
-	}
+	trialEnd := now.Add(7 * 24 * time.Hour) // 7-day trial
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id, email, name, role, password_hash, pat_token, trial_ends_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		userID, email, name, role, pwdHash, patToken, trialEndsAt, now,
+		`INSERT INTO users (id, email, name, role, password_hash, pat_token, trial_ends_at, created_at) VALUES (?, ?, ?, 'developer', ?, ?, ?, ?)`,
+		userID, email, name, pwdHash, pat, trialEnd, now,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("user creation failed: %w", err)
 	}
 
-	plan := "basic"
-	status := "trialing"
-	if role == "superadmin" {
-		plan = "business"
-		status = "active"
-	}
+	// Auto-create active 7-day trial subscription record
 	_ = s.CreateOrUpdateSubscription(ctx, &SubscriptionRecord{
+		ID:          "sub_trial_" + hex.EncodeToString(rawBytes[:6]),
 		UserID:      userID,
-		Plan:        plan,
-		Status:      status,
+		Plan:        "basic",
+		Status:      "active",
 		MaxSessions: 1,
-		AmountCents: 600,
+		AmountCents: 0,
 		Currency:    "usd",
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -300,9 +274,9 @@ func (s *Store) CreateUser(ctx context.Context, name, email, rawPassword string)
 		ID:          userID,
 		Email:       email,
 		Name:        name,
-		Role:        role,
-		PATToken:    patToken,
-		TrialEndsAt: trialEndsAt,
+		Role:        "developer",
+		PATToken:    pat,
+		TrialEndsAt: trialEnd,
 		CreatedAt:   now,
 	}, nil
 }
@@ -310,189 +284,167 @@ func (s *Store) CreateUser(ctx context.Context, name, email, rawPassword string)
 func (s *Store) AuthenticateUser(ctx context.Context, email, rawPassword string) (*User, error) {
 	pwdHash := hashKey(rawPassword)
 	var u User
-	var role sql.NullString
-	var trialEnds sql.NullTime
+	var trialEnd sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, name, COALESCE(role, 'developer'), pat_token, trial_ends_at, created_at FROM users WHERE email = ? AND password_hash = ?`,
+		`SELECT id, email, name, role, pat_token, trial_ends_at, created_at FROM users WHERE email = ? AND password_hash = ?`,
 		email, pwdHash,
-	).Scan(&u.ID, &u.Email, &u.Name, &role, &u.PATToken, &trialEnds, &u.CreatedAt)
+	).Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.PATToken, &trialEnd, &u.CreatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("invalid email or password")
+		return nil, err
 	}
-	if role.Valid && role.String != "" {
-		u.Role = role.String
-	} else {
-		u.Role = "developer"
-	}
-	if trialEnds.Valid {
-		u.TrialEndsAt = trialEnds.Time
-	} else {
-		u.TrialEndsAt = u.CreatedAt.Add(7 * 24 * time.Hour)
+	if trialEnd.Valid {
+		u.TrialEndsAt = trialEnd.Time
 	}
 	return &u, nil
 }
 
 func (s *Store) GetUserByPAT(ctx context.Context, pat string) (*User, error) {
 	var u User
-	var role sql.NullString
-	var trialEnds sql.NullTime
+	var trialEnd sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, name, COALESCE(role, 'developer'), pat_token, trial_ends_at, created_at FROM users WHERE pat_token = ?`,
+		`SELECT id, email, name, role, pat_token, trial_ends_at, created_at FROM users WHERE pat_token = ?`,
 		pat,
-	).Scan(&u.ID, &u.Email, &u.Name, &role, &u.PATToken, &trialEnds, &u.CreatedAt)
+	).Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.PATToken, &trialEnd, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
-	if role.Valid && role.String != "" {
-		u.Role = role.String
-	} else {
-		u.Role = "developer"
-	}
-	if trialEnds.Valid {
-		u.TrialEndsAt = trialEnds.Time
-	} else {
-		u.TrialEndsAt = u.CreatedAt.Add(7 * 24 * time.Hour)
+	if trialEnd.Valid {
+		u.TrialEndsAt = trialEnd.Time
 	}
 	return &u, nil
 }
 
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	var u User
-	var role sql.NullString
-	var trialEnds sql.NullTime
+	var trialEnd sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, name, COALESCE(role, 'developer'), pat_token, trial_ends_at, created_at FROM users WHERE email = ?`,
+		`SELECT id, email, name, role, pat_token, trial_ends_at, created_at FROM users WHERE email = ?`,
 		email,
-	).Scan(&u.ID, &u.Email, &u.Name, &role, &u.PATToken, &trialEnds, &u.CreatedAt)
+	).Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.PATToken, &trialEnd, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
-	if role.Valid && role.String != "" {
-		u.Role = role.String
-	} else {
-		u.Role = "developer"
-	}
-	if trialEnds.Valid {
-		u.TrialEndsAt = trialEnds.Time
-	} else {
-		u.TrialEndsAt = u.CreatedAt.Add(7 * 24 * time.Hour)
+	if trialEnd.Valid {
+		u.TrialEndsAt = trialEnd.Time
 	}
 	return &u, nil
 }
 
-func (s *Store) ListUsersWithSubscriptions(ctx context.Context) ([]*UserWithSubscription, error) {
+func (s *Store) GetUserByID(ctx context.Context, id string) (*User, error) {
+	var u User
+	var trialEnd sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, email, name, role, pat_token, trial_ends_at, created_at FROM users WHERE id = ?`,
+		id,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.PATToken, &trialEnd, &u.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if trialEnd.Valid {
+		u.TrialEndsAt = trialEnd.Time
+	}
+	return &u, nil
+}
+
+func (s *Store) UpdateUserProfile(ctx context.Context, id, name, email string) (*User, error) {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET name = ?, email = ? WHERE id = ?`, name, email, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetUserByID(ctx, id)
+}
+
+func (s *Store) GrantPackage(ctx context.Context, userID, plan string, maxSessions, amountCents int) (*SubscriptionRecord, error) {
+	sub, err := s.GetSubscriptionByUserID(ctx, userID)
+	if err != nil || sub == nil {
+		sub = &SubscriptionRecord{
+			UserID: userID,
+		}
+	}
+	sub.Plan = plan
+	sub.Status = "active"
+	sub.MaxSessions = maxSessions
+	sub.AmountCents = amountCents
+	sub.Currency = "usd"
+	if err := s.CreateOrUpdateSubscription(ctx, sub); err != nil {
+		return nil, err
+	}
+	return sub, nil
+}
+
+func (s *Store) RegeneratePAT(ctx context.Context, id string) (string, error) {
+	rawBytes := make([]byte, 20)
+	if _, err := rand.Read(rawBytes); err != nil {
+		return "", err
+	}
+	newPAT := "wac_pat_" + hex.EncodeToString(rawBytes)
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET pat_token = ? WHERE id = ?`, newPAT, id)
+	return newPAT, err
+}
+
+func (s *Store) DeleteUser(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) ListUsersWithSubscriptions(ctx context.Context) ([]UserWithSubscription, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, email, name, COALESCE(role, 'developer'), pat_token, trial_ends_at, created_at
-		FROM users ORDER BY created_at DESC
+		SELECT u.id, u.email, u.name, u.role, u.pat_token, u.trial_ends_at, u.created_at,
+		       s.id, s.plan, s.status, s.max_sessions, s.amount_cents, s.currency, s.created_at, s.updated_at
+		FROM users u
+		LEFT JOIN subscriptions s ON u.id = s.user_id
+		ORDER BY u.created_at DESC
 	`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var result []*UserWithSubscription
+	var list []UserWithSubscription
 	now := time.Now().UTC()
-
 	for rows.Next() {
 		var u UserWithSubscription
-		var role sql.NullString
-		var trialEnds sql.NullTime
-		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &role, &u.PATToken, &trialEnds, &u.CreatedAt); err != nil {
+		var trialEnd sql.NullTime
+		var subID, subPlan, subStatus, subCurr sql.NullString
+		var subMax, subAmt sql.NullInt64
+		var subCreated, subUpdated sql.NullTime
+
+		if err := rows.Scan(
+			&u.ID, &u.Email, &u.Name, &u.Role, &u.PATToken, &trialEnd, &u.CreatedAt,
+			&subID, &subPlan, &subStatus, &subMax, &subAmt, &subCurr, &subCreated, &subUpdated,
+		); err != nil {
 			return nil, err
 		}
-		if role.Valid && role.String != "" {
-			u.Role = role.String
-		} else {
-			u.Role = "developer"
-		}
-		if trialEnds.Valid {
-			u.TrialEndsAt = trialEnds.Time
-		} else {
-			u.TrialEndsAt = u.CreatedAt.Add(7 * 24 * time.Hour)
-		}
 
-		u.IsTrial = u.TrialEndsAt.After(now)
-		if u.IsTrial {
-			u.DaysLeft = int(time.Until(u.TrialEndsAt).Hours()/24) + 1
-			if u.DaysLeft < 0 {
-				u.DaysLeft = 0
+		if trialEnd.Valid {
+			u.TrialEndsAt = trialEnd.Time
+			if trialEnd.Time.After(now) {
+				u.IsTrial = true
+				u.DaysLeft = int(trialEnd.Time.Sub(now).Hours()/24) + 1
 			}
 		}
 
-		sub, _ := s.GetSubscriptionByUserID(ctx, u.ID)
-		u.Sub = sub
-
-		result = append(result, &u)
-	}
-	return result, nil
-}
-
-func (s *Store) UpdateUserProfile(ctx context.Context, userID, name, email string) (*User, error) {
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET name = ?, email = ? WHERE id = ?`, name, email, userID)
-	if err != nil {
-		return nil, err
-	}
-	var u User
-	var role sql.NullString
-	var trialEnds sql.NullTime
-	err = s.db.QueryRowContext(ctx,
-		`SELECT id, email, name, COALESCE(role, 'developer'), pat_token, trial_ends_at, created_at FROM users WHERE id = ?`,
-		userID,
-	).Scan(&u.ID, &u.Email, &u.Name, &role, &u.PATToken, &trialEnds, &u.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	if role.Valid && role.String != "" {
-		u.Role = role.String
-	} else {
-		u.Role = "developer"
-	}
-	return &u, nil
-}
-
-func (s *Store) GrantPackage(ctx context.Context, userID, plan string, maxSessions int) error {
-	now := time.Now().UTC()
-	sub, _ := s.GetSubscriptionByUserID(ctx, userID)
-	if sub == nil {
-		sub = &SubscriptionRecord{
-			UserID:    userID,
-			CreatedAt: now,
+		if subID.Valid {
+			u.Sub = &SubscriptionRecord{
+				ID:          subID.String,
+				UserID:      u.ID,
+				Plan:        subPlan.String,
+				Status:      subStatus.String,
+				MaxSessions: int(subMax.Int64),
+				AmountCents: int(subAmt.Int64),
+				Currency:    subCurr.String,
+				CreatedAt:   subCreated.Time,
+				UpdatedAt:   subUpdated.Time,
+			}
 		}
+		list = append(list, u)
 	}
-	sub.Plan = plan
-	sub.Status = "active"
-	sub.MaxSessions = maxSessions
-	sub.UpdatedAt = now
-	return s.CreateOrUpdateSubscription(ctx, sub)
-}
-
-func (s *Store) DeleteUser(ctx context.Context, userID string) error {
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM subscriptions WHERE user_id = ?`, userID)
-	_, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID)
-	return err
-}
-
-func (s *Store) RegeneratePAT(ctx context.Context, userID string) (string, error) {
-	rawBytes := make([]byte, 20)
-	if _, err := rand.Read(rawBytes); err != nil {
-		return "", err
-	}
-	newPAT := "wac_pat_" + hex.EncodeToString(rawBytes)
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET pat_token = ? WHERE id = ?`, newPAT, userID)
-	if err != nil {
-		return "", err
-	}
-	return newPAT, nil
+	return list, nil
 }
 
 // ----------------- API Keys -----------------
 
-func hashKey(raw string) string {
-	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:])
-}
-
-func (s *Store) CreateAPIKey(ctx context.Context, name string) (*APIKey, error) {
+func (s *Store) CreateAPIKey(ctx context.Context, name, userID string) (*APIKey, error) {
 	rawBytes := make([]byte, 24)
 	if _, err := rand.Read(rawBytes); err != nil {
 		return nil, err
@@ -503,8 +455,8 @@ func (s *Store) CreateAPIKey(ctx context.Context, name string) (*APIKey, error) 
 	now := time.Now().UTC()
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO api_keys (id, key_hash, name, created_at, enabled) VALUES (?, ?, ?, ?, 1)`,
-		keyID, hash, name, now,
+		`INSERT INTO api_keys (id, user_id, key_hash, name, created_at, enabled) VALUES (?, ?, ?, ?, ?, 1)`,
+		keyID, userID, hash, name, now,
 	)
 	if err != nil {
 		return nil, err
@@ -512,6 +464,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, name string) (*APIKey, error) 
 
 	return &APIKey{
 		ID:        keyID,
+		UserID:    userID,
 		Key:       rawKey,
 		Name:      name,
 		CreatedAt: now,
@@ -523,12 +476,16 @@ func (s *Store) ValidateAPIKey(ctx context.Context, rawKey string) (bool, *APIKe
 	hash := hashKey(rawKey)
 	var k APIKey
 	var lastUsed sql.NullTime
+	var userID sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, created_at, last_used_at, enabled FROM api_keys WHERE key_hash = ? AND enabled = 1`,
+		`SELECT id, user_id, name, created_at, last_used_at, enabled FROM api_keys WHERE key_hash = ? AND enabled = 1`,
 		hash,
-	).Scan(&k.ID, &k.Name, &k.CreatedAt, &lastUsed, &k.Enabled)
+	).Scan(&k.ID, &userID, &k.Name, &k.CreatedAt, &lastUsed, &k.Enabled)
 	if err != nil {
 		return false, nil
+	}
+	if userID.Valid {
+		k.UserID = userID.String
 	}
 	if lastUsed.Valid {
 		k.LastUsedAt = &lastUsed.Time
@@ -541,7 +498,7 @@ func (s *Store) ValidateAPIKey(ctx context.Context, rawKey string) (bool, *APIKe
 }
 
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, created_at, last_used_at, enabled FROM api_keys ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, name, created_at, last_used_at, enabled FROM api_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -551,8 +508,38 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	for rows.Next() {
 		var k APIKey
 		var lastUsed sql.NullTime
-		if err := rows.Scan(&k.ID, &k.Name, &k.CreatedAt, &lastUsed, &k.Enabled); err != nil {
+		var userID sql.NullString
+		if err := rows.Scan(&k.ID, &userID, &k.Name, &k.CreatedAt, &lastUsed, &k.Enabled); err != nil {
 			return nil, err
+		}
+		if userID.Valid {
+			k.UserID = userID.String
+		}
+		if lastUsed.Valid {
+			k.LastUsedAt = &lastUsed.Time
+		}
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+func (s *Store) ListAPIKeysByUser(ctx context.Context, userID string) ([]APIKey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, name, created_at, last_used_at, enabled FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []APIKey
+	for rows.Next() {
+		var k APIKey
+		var lastUsed sql.NullTime
+		var uid sql.NullString
+		if err := rows.Scan(&k.ID, &uid, &k.Name, &k.CreatedAt, &lastUsed, &k.Enabled); err != nil {
+			return nil, err
+		}
+		if uid.Valid {
+			k.UserID = uid.String
 		}
 		if lastUsed.Valid {
 			k.LastUsedAt = &lastUsed.Time
@@ -567,31 +554,37 @@ func (s *Store) DeleteAPIKey(ctx context.Context, id string) error {
 	return err
 }
 
-func (s *Store) UpsertSession(ctx context.Context, id, name, jid, status, webhookURL, apiKey string) error {
+// ----------------- Sessions -----------------
+
+func (s *Store) UpsertSession(ctx context.Context, id, name, jid, status, webhookURL, apiKey, userID string) error {
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO sessions (id, name, jid, status, webhook_url, api_key, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO sessions (id, name, user_id, jid, status, webhook_url, api_key, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = CASE WHEN excluded.name != '' THEN excluded.name ELSE sessions.name END,
+			user_id = CASE WHEN excluded.user_id != '' THEN excluded.user_id ELSE sessions.user_id END,
 			jid = CASE WHEN excluded.jid != '' THEN excluded.jid ELSE sessions.jid END,
 			status = excluded.status,
 			webhook_url = CASE WHEN excluded.webhook_url != '' THEN excluded.webhook_url ELSE sessions.webhook_url END,
 			api_key = CASE WHEN excluded.api_key != '' THEN excluded.api_key ELSE sessions.api_key END,
 			updated_at = excluded.updated_at
-	`, id, name, jid, status, webhookURL, apiKey, now, now)
+	`, id, name, userID, jid, status, webhookURL, apiKey, now, now)
 	return err
 }
 
 func (s *Store) GetSession(ctx context.Context, id string) (*SessionRecord, error) {
 	var r SessionRecord
-	var jid, webhook, apiKey sql.NullString
+	var jid, webhook, apiKey, userID sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, jid, status, webhook_url, api_key, created_at, updated_at FROM sessions WHERE id = ?`,
+		`SELECT id, name, user_id, jid, status, webhook_url, api_key, created_at, updated_at FROM sessions WHERE id = ?`,
 		id,
-	).Scan(&r.ID, &r.Name, &jid, &r.Status, &webhook, &apiKey, &r.CreatedAt, &r.UpdatedAt)
+	).Scan(&r.ID, &r.Name, &userID, &jid, &r.Status, &webhook, &apiKey, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if userID.Valid {
+		r.UserID = userID.String
 	}
 	if jid.Valid {
 		r.JID = jid.String
@@ -607,13 +600,16 @@ func (s *Store) GetSession(ctx context.Context, id string) (*SessionRecord, erro
 
 func (s *Store) GetSessionByAPIKey(ctx context.Context, key string) (*SessionRecord, error) {
 	var r SessionRecord
-	var jid, webhook, apiKey sql.NullString
+	var jid, webhook, apiKey, userID sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, jid, status, webhook_url, api_key, created_at, updated_at FROM sessions WHERE api_key = ?`,
+		`SELECT id, name, user_id, jid, status, webhook_url, api_key, created_at, updated_at FROM sessions WHERE api_key = ?`,
 		key,
-	).Scan(&r.ID, &r.Name, &jid, &r.Status, &webhook, &apiKey, &r.CreatedAt, &r.UpdatedAt)
+	).Scan(&r.ID, &r.Name, &userID, &jid, &r.Status, &webhook, &apiKey, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if userID.Valid {
+		r.UserID = userID.String
 	}
 	if jid.Valid {
 		r.JID = jid.String
@@ -628,7 +624,7 @@ func (s *Store) GetSessionByAPIKey(ctx context.Context, key string) (*SessionRec
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]SessionRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, jid, status, webhook_url, api_key, created_at, updated_at FROM sessions ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, user_id, jid, status, webhook_url, api_key, created_at, updated_at FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -637,9 +633,43 @@ func (s *Store) ListSessions(ctx context.Context) ([]SessionRecord, error) {
 	var records []SessionRecord
 	for rows.Next() {
 		var r SessionRecord
-		var jid, webhook, apiKey sql.NullString
-		if err := rows.Scan(&r.ID, &r.Name, &jid, &r.Status, &webhook, &apiKey, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		var jid, webhook, apiKey, userID sql.NullString
+		if err := rows.Scan(&r.ID, &r.Name, &userID, &jid, &r.Status, &webhook, &apiKey, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if userID.Valid {
+			r.UserID = userID.String
+		}
+		if jid.Valid {
+			r.JID = jid.String
+		}
+		if webhook.Valid {
+			r.WebhookURL = webhook.String
+		}
+		if apiKey.Valid {
+			r.APIKey = apiKey.String
+		}
+		records = append(records, r)
+	}
+	return records, nil
+}
+
+func (s *Store) ListSessionsByUser(ctx context.Context, userID string) ([]SessionRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, user_id, jid, status, webhook_url, api_key, created_at, updated_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []SessionRecord
+	for rows.Next() {
+		var r SessionRecord
+		var jid, webhook, apiKey, uid sql.NullString
+		if err := rows.Scan(&r.ID, &r.Name, &uid, &jid, &r.Status, &webhook, &apiKey, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if uid.Valid {
+			r.UserID = uid.String
 		}
 		if jid.Valid {
 			r.JID = jid.String
@@ -719,6 +749,53 @@ func (s *Store) ListCalls(ctx context.Context, sessionID string, limit int) ([]C
 	return list, nil
 }
 
+func (s *Store) ListCallsByUser(ctx context.Context, userID string, sessionID string, limit int) ([]CallRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var rows *sql.Rows
+	var err error
+	if sessionID != "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT c.call_id, c.session_id, c.direction, c.peer_number, c.status, c.duration_seconds, c.started_at, c.ended_at, c.reason
+			FROM calls c
+			INNER JOIN sessions s ON c.session_id = s.id
+			WHERE s.user_id = ? AND c.session_id = ?
+			ORDER BY c.started_at DESC LIMIT ?
+		`, userID, sessionID, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT c.call_id, c.session_id, c.direction, c.peer_number, c.status, c.duration_seconds, c.started_at, c.ended_at, c.reason
+			FROM calls c
+			INNER JOIN sessions s ON c.session_id = s.id
+			WHERE s.user_id = ?
+			ORDER BY c.started_at DESC LIMIT ?
+		`, userID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []CallRecord
+	for rows.Next() {
+		var c CallRecord
+		var endedAt sql.NullTime
+		var reason sql.NullString
+		if err := rows.Scan(&c.CallID, &c.SessionID, &c.Direction, &c.PeerNumber, &c.Status, &c.DurationSeconds, &c.StartedAt, &endedAt, &reason); err != nil {
+			return nil, err
+		}
+		if endedAt.Valid {
+			c.EndedAt = &endedAt.Time
+		}
+		if reason.Valid {
+			c.Reason = reason.String
+		}
+		list = append(list, c)
+	}
+	return list, nil
+}
+
 // ----------------- Messages -----------------
 
 func (s *Store) InsertMessage(ctx context.Context, msg MessageRecord) error {
@@ -769,15 +846,72 @@ func (s *Store) ListMessages(ctx context.Context, sessionID string, limit int) (
 	return list, nil
 }
 
+func (s *Store) ListMessagesByUser(ctx context.Context, userID string, sessionID string, limit int) ([]MessageRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var rows *sql.Rows
+	var err error
+	if sessionID != "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT m.id, m.session_id, m.message_id, m.direction, m.peer_number, m.msg_type, m.content, m.media_url, m.status, m.timestamp
+			FROM messages m
+			INNER JOIN sessions s ON m.session_id = s.id
+			WHERE s.user_id = ? AND m.session_id = ?
+			ORDER BY m.timestamp DESC LIMIT ?
+		`, userID, sessionID, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT m.id, m.session_id, m.message_id, m.direction, m.peer_number, m.msg_type, m.content, m.media_url, m.status, m.timestamp
+			FROM messages m
+			INNER JOIN sessions s ON m.session_id = s.id
+			WHERE s.user_id = ?
+			ORDER BY m.timestamp DESC LIMIT ?
+		`, userID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []MessageRecord
+	for rows.Next() {
+		var m MessageRecord
+		var content, mediaURL sql.NullString
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.MessageID, &m.Direction, &m.PeerNumber, &m.MsgType, &content, &mediaURL, &m.Status, &m.Timestamp); err != nil {
+			return nil, err
+		}
+		if content.Valid {
+			m.Content = content.String
+		}
+		if mediaURL.Valid {
+			m.MediaURL = mediaURL.String
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
 // ----------------- Webhook Logs -----------------
 
-func (s *Store) LogWebhook(ctx context.Context, sessionID, event, targetURL string, statusCode int, payload, errMsg string) error {
-	now := time.Now().UTC()
+func (s *Store) InsertWebhookLog(ctx context.Context, log WebhookLogRecord) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO webhook_logs (session_id, event, target_url, status_code, payload, error, timestamp)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, sessionID, event, targetURL, statusCode, payload, errMsg, now)
+	`, log.SessionID, log.Event, log.TargetURL, log.StatusCode, log.Payload, log.Error, log.Timestamp)
 	return err
+}
+
+func (s *Store) LogWebhook(ctx context.Context, sessionID, event, targetURL string, statusCode int, payload, errMsg string) error {
+	return s.InsertWebhookLog(ctx, WebhookLogRecord{
+		SessionID:  sessionID,
+		Event:      event,
+		TargetURL:  targetURL,
+		StatusCode: statusCode,
+		Payload:    payload,
+		Error:      errMsg,
+		Timestamp:  time.Now().UTC(),
+	})
 }
 
 func (s *Store) ListWebhookLogs(ctx context.Context, limit int) ([]WebhookLogRecord, error) {
@@ -788,6 +922,40 @@ func (s *Store) ListWebhookLogs(ctx context.Context, limit int) ([]WebhookLogRec
 		SELECT id, session_id, event, target_url, status_code, payload, error, timestamp
 		FROM webhook_logs ORDER BY timestamp DESC LIMIT ?
 	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []WebhookLogRecord
+	for rows.Next() {
+		var l WebhookLogRecord
+		var sessID, errStr sql.NullString
+		if err := rows.Scan(&l.ID, &sessID, &l.Event, &l.TargetURL, &l.StatusCode, &l.Payload, &errStr, &l.Timestamp); err != nil {
+			return nil, err
+		}
+		if sessID.Valid {
+			l.SessionID = sessID.String
+		}
+		if errStr.Valid {
+			l.Error = errStr.String
+		}
+		list = append(list, l)
+	}
+	return list, nil
+}
+
+func (s *Store) ListWebhookLogsByUser(ctx context.Context, userID string, limit int) ([]WebhookLogRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT w.id, w.session_id, w.event, w.target_url, w.status_code, w.payload, w.error, w.timestamp
+		FROM webhook_logs w
+		INNER JOIN sessions s ON w.session_id = s.id
+		WHERE s.user_id = ?
+		ORDER BY w.timestamp DESC LIMIT ?
+	`, userID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -830,6 +998,14 @@ type SystemStats struct {
 	SuccessWebhooks  int `json:"success_webhooks"`
 }
 
+type UserStats struct {
+	TotalSessions     int `json:"total_sessions"`
+	ConnectedSessions int `json:"connected_sessions"`
+	TotalCalls        int `json:"total_calls"`
+	TotalMessages     int `json:"total_messages"`
+	TotalWebhookLogs  int `json:"total_webhook_logs"`
+}
+
 func (s *Store) GetSystemStats(ctx context.Context) (SystemStats, error) {
 	var stats SystemStats
 	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users").Scan(&stats.TotalUsers)
@@ -839,6 +1015,16 @@ func (s *Store) GetSystemStats(ctx context.Context) (SystemStats, error) {
 	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages").Scan(&stats.TotalMessages)
 	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM webhook_logs").Scan(&stats.TotalWebhookLogs)
 	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM webhook_logs WHERE status_code >= 200 AND status_code < 300").Scan(&stats.SuccessWebhooks)
+	return stats, nil
+}
+
+func (s *Store) GetUserStats(ctx context.Context, userID string) (UserStats, error) {
+	var stats UserStats
+	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions WHERE user_id = ?", userID).Scan(&stats.TotalSessions)
+	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND status = 'CONNECTED'", userID).Scan(&stats.ConnectedSessions)
+	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM calls c INNER JOIN sessions s ON c.session_id = s.id WHERE s.user_id = ?", userID).Scan(&stats.TotalCalls)
+	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages m INNER JOIN sessions s ON m.session_id = s.id WHERE s.user_id = ?", userID).Scan(&stats.TotalMessages)
+	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM webhook_logs w INNER JOIN sessions s ON w.session_id = s.id WHERE s.user_id = ?", userID).Scan(&stats.TotalWebhookLogs)
 	return stats, nil
 }
 
@@ -935,3 +1121,26 @@ func (s *Store) GetSubscriptionByStripeSessionID(ctx context.Context, sessionID 
 	return &sub, nil
 }
 
+func hashKey(raw string) string {
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:])
+}
+
+func Open(ctx context.Context, path string) (*Store, error) {
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", path))
+	if err != nil {
+		return nil, err
+	}
+
+	s := &Store{db: db}
+	if err := s.migrate(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func (s *Store) Close() error {
+	return s.db.Close()
+}

@@ -194,10 +194,14 @@ func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleSystemStats(w http.ResponseWriter, r *http.Request) {
 	isAdmin, _ := r.Context().Value("is_admin").(bool)
-	isPAT, _ := r.Context().Value("is_pat").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
 
-	// For normal users / unauthenticated requests, only return high-level availability status
-	if !isAdmin && !isPAT {
+	// For superadmin / master key: full hardware, memory, DB telemetry & platform stats
+	if isAdmin {
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+
+		dbStats, _ := a.store.GetSystemStats(r.Context())
 		sessions := a.sessions.ListSessions()
 		connectedCount := 0
 		for _, s := range sessions {
@@ -205,9 +209,40 @@ func (a *API) handleSystemStats(w http.ResponseWriter, r *http.Request) {
 				connectedCount++
 			}
 		}
+
+		var dbFileSize int64
+		if fi, err := os.Stat("wacaller.db"); err == nil {
+			dbFileSize = fi.Size()
+		}
+
 		writeJSON(w, http.StatusOK, map[string]any{
-			"success": true,
-			"status":  "operational",
+			"success":  true,
+			"is_admin": true,
+			"system": map[string]any{
+				"status":          "operational",
+				"uptime":          time.Since(a.startTime).Round(time.Second).String(),
+				"started_at":      a.startTime,
+				"goroutines":      runtime.NumGoroutine(),
+				"num_cpu":         runtime.NumCPU(),
+				"go_version":      runtime.Version(),
+				"memory_alloc_mb": float64(mem.Alloc) / 1024 / 1024,
+				"memory_sys_mb":   float64(mem.Sys) / 1024 / 1024,
+				"gc_cycles":       mem.NumGC,
+			},
+			"database": map[string]any{
+				"path":               "wacaller.db",
+				"file_size_bytes":    dbFileSize,
+				"file_size_kb":       float64(dbFileSize) / 1024,
+				"journal_mode":       "WAL",
+				"concurrency":        "multi-reader single-writer",
+				"total_users":        dbStats.TotalUsers,
+				"total_api_keys":     dbStats.TotalAPIKeys,
+				"total_sessions":     dbStats.TotalSessions,
+				"total_calls":        dbStats.TotalCalls,
+				"total_messages":     dbStats.TotalMessages,
+				"total_webhook_logs": dbStats.TotalWebhookLogs,
+				"success_webhooks":   dbStats.SuccessWebhooks,
+			},
 			"sessions_summary": map[string]any{
 				"total":     len(sessions),
 				"connected": connectedCount,
@@ -216,58 +251,49 @@ func (a *API) handleSystemStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var mem runtime.MemStats
-	runtime.ReadMemStats(&mem)
-
-	dbStats, _ := a.store.GetSystemStats(r.Context())
-	sessions := a.sessions.ListSessions()
-	connectedCount := 0
-	connectingCount := 0
-	for _, s := range sessions {
-		if s.Status == "CONNECTED" {
-			connectedCount++
-		} else if s.Status == "CONNECTING" {
-			connectingCount++
+	// For authenticated developers: tenant-isolated metrics
+	if userID != "" {
+		uStats, _ := a.store.GetUserStats(r.Context(), userID)
+		userSessions := a.sessions.ListSessionsByUser(userID)
+		connectedCount := 0
+		for _, s := range userSessions {
+			if s.Status == "CONNECTED" {
+				connectedCount++
+			}
 		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success":  true,
+			"is_admin": false,
+			"status":   "operational",
+			"database": map[string]any{
+				"total_sessions":     len(userSessions),
+				"total_calls":        uStats.TotalCalls,
+				"total_messages":     uStats.TotalMessages,
+				"total_webhook_logs": uStats.TotalWebhookLogs,
+			},
+			"sessions_summary": map[string]any{
+				"total":     len(userSessions),
+				"connected": connectedCount,
+			},
+		})
+		return
 	}
 
-	var dbFileSize int64
-	if fi, err := os.Stat("wacaller.db"); err == nil {
-		dbFileSize = fi.Size()
-	}
-
+	// For guest / unauthenticated:
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success": true,
-		"system": map[string]any{
-			"status":          "operational",
-			"uptime":          time.Since(a.startTime).Round(time.Second).String(),
-			"started_at":      a.startTime,
-			"goroutines":      runtime.NumGoroutine(),
-			"num_cpu":         runtime.NumCPU(),
-			"go_version":      runtime.Version(),
-			"memory_alloc_mb": float64(mem.Alloc) / 1024 / 1024,
-			"memory_sys_mb":   float64(mem.Sys) / 1024 / 1024,
-			"gc_cycles":       mem.NumGC,
-		},
+		"success":  true,
+		"is_admin": false,
+		"status":   "operational",
 		"database": map[string]any{
-			"path":               "wacaller.db",
-			"file_size_bytes":    dbFileSize,
-			"file_size_kb":       float64(dbFileSize) / 1024,
-			"journal_mode":       "WAL",
-			"concurrency":        "multi-reader single-writer",
-			"total_users":        dbStats.TotalUsers,
-			"total_api_keys":     dbStats.TotalAPIKeys,
-			"total_sessions":     dbStats.TotalSessions,
-			"total_calls":        dbStats.TotalCalls,
-			"total_messages":     dbStats.TotalMessages,
-			"total_webhook_logs": dbStats.TotalWebhookLogs,
-			"success_webhooks":   dbStats.SuccessWebhooks,
+			"total_sessions":     0,
+			"total_calls":        0,
+			"total_messages":     0,
+			"total_webhook_logs": 0,
 		},
 		"sessions_summary": map[string]any{
-			"total":      len(sessions),
-			"connected":  connectedCount,
-			"connecting": connectingCount,
-			"offline":    len(sessions) - connectedCount - connectingCount,
+			"total":     0,
+			"connected": 0,
 		},
 	})
 }
@@ -336,9 +362,10 @@ func (a *API) handleStripeCheckout(w http.ResponseWriter, r *http.Request) {
 		planInfo = AvailablePlans["basic"]
 	}
 
-	userID := "usr_admin_yasiru"
-	if usr, ok := r.Context().Value("user").(*store.User); ok && usr != nil {
-		userID = usr.ID
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "Please sign in or register before subscribing to a plan.")
+		return
 	}
 
 	successURL := body.SuccessURL
@@ -445,7 +472,7 @@ func (a *API) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 		subID, _ := sessionObj["subscription"].(string)
 		metadata, _ := sessionObj["metadata"].(map[string]any)
 		planID := "basic"
-		userID := "usr_admin_yasiru"
+		userID := ""
 		if metadata != nil {
 			if p, ok := metadata["plan"].(string); ok {
 				planID = p
@@ -459,17 +486,19 @@ func (a *API) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 			planInfo = AvailablePlans["basic"]
 		}
 
-		_ = a.store.CreateOrUpdateSubscription(r.Context(), &store.SubscriptionRecord{
-			UserID:               userID,
-			Plan:                 planID,
-			Status:               "active",
-			MaxSessions:          planInfo.MaxSessions,
-			StripeCustomerID:     custID,
-			StripeSubscriptionID: subID,
-			StripeSessionID:      sessionID,
-			AmountCents:          planInfo.AmountCents,
-			Currency:             "usd",
-		})
+		if userID != "" {
+			_ = a.store.CreateOrUpdateSubscription(r.Context(), &store.SubscriptionRecord{
+				UserID:               userID,
+				Plan:                 planID,
+				Status:               "active",
+				MaxSessions:          planInfo.MaxSessions,
+				StripeCustomerID:     custID,
+				StripeSubscriptionID: subID,
+				StripeSessionID:      sessionID,
+				AmountCents:          planInfo.AmountCents,
+				Currency:             "usd",
+			})
+		}
 
 	case "customer.subscription.deleted":
 		subObj := event.Data.Object
@@ -488,20 +517,28 @@ func (a *API) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleGetSubscription(w http.ResponseWriter, r *http.Request) {
-	userID := "usr_admin_yasiru"
-	if usr, ok := r.Context().Value("user").(*store.User); ok && usr != nil {
-		userID = usr.ID
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success":         true,
+			"subscription":    nil,
+			"current_plan":    nil,
+			"available_plans": AvailablePlans,
+			"stripe_enabled":  a.cfg.StripeSecretKey != "",
+			"publishable_key": a.cfg.StripePublishableKey,
+		})
+		return
 	}
 
 	sub, err := a.store.GetSubscriptionByUserID(r.Context(), userID)
 	if err != nil || sub == nil {
 		sub = &store.SubscriptionRecord{
-			ID:          "sub_default",
+			ID:          "sub_trial",
 			UserID:      userID,
 			Plan:        "basic",
-			Status:      "active",
+			Status:      "trial",
 			MaxSessions: 1,
-			AmountCents: 600,
+			AmountCents: 0,
 			Currency:    "usd",
 			CreatedAt:   time.Now().UTC(),
 			UpdatedAt:   time.Now().UTC(),
@@ -524,6 +561,12 @@ func (a *API) handleGetSubscription(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleDirectActivatePlan(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "Authentication required to activate plan.")
+		return
+	}
+
 	var body struct {
 		Plan string `json:"plan"`
 	}
@@ -533,11 +576,6 @@ func (a *API) handleDirectActivatePlan(w http.ResponseWriter, r *http.Request) {
 	planInfo, exists := AvailablePlans[planID]
 	if !exists {
 		planInfo = AvailablePlans["basic"]
-	}
-
-	userID := "usr_admin_yasiru"
-	if usr, ok := r.Context().Value("user").(*store.User); ok && usr != nil {
-		userID = usr.ID
 	}
 
 	_ = a.store.CreateOrUpdateSubscription(r.Context(), &store.SubscriptionRecord{
@@ -560,7 +598,18 @@ func (a *API) handleDirectActivatePlan(w http.ResponseWriter, r *http.Request) {
 // ---------------- Sessions ----------------
 
 func (a *API) handleSessionList(w http.ResponseWriter, r *http.Request) {
-	sessions := a.sessions.ListSessions()
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
+
+	var sessions []session.SessionInfo
+	if isAdmin {
+		sessions = a.sessions.ListSessions()
+	} else if userID != "" {
+		sessions = a.sessions.ListSessionsByUser(userID)
+	} else {
+		sessions = []session.SessionInfo{}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":  true,
 		"sessions": sessions,
@@ -568,13 +617,35 @@ func (a *API) handleSessionList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
+
 	var body struct {
 		Name       string `json:"name"`
 		WebhookURL string `json:"webhook_url"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	sess, err := a.sessions.CreateSession(r.Context(), body.Name, body.WebhookURL)
+	if !isAdmin && userID == "" {
+		writeError(w, http.StatusUnauthorized, "Authentication required. Please sign in or pass a valid Personal Access Token (PAT).")
+		return
+	}
+
+	// Enforce quota for non-admins
+	if !isAdmin && userID != "" {
+		sub, _ := a.store.GetSubscriptionByUserID(r.Context(), userID)
+		maxLines := 1
+		if sub != nil && sub.MaxSessions > 0 {
+			maxLines = sub.MaxSessions
+		}
+		userSessions := a.sessions.ListSessionsByUser(userID)
+		if len(userSessions) >= maxLines {
+			writeError(w, http.StatusForbidden, fmt.Sprintf("WhatsApp lines quota reached for your plan (%d maximum). Please upgrade your subscription.", maxLines))
+			return
+		}
+	}
+
+	sess, err := a.sessions.CreateSession(r.Context(), body.Name, body.WebhookURL, userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -592,10 +663,16 @@ func (a *API) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionGet(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
+		writeError(w, http.StatusForbidden, "access denied to this session")
 		return
 	}
 
@@ -606,10 +683,16 @@ func (a *API) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionQR(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
+		writeError(w, http.StatusForbidden, "access denied to this session")
 		return
 	}
 
@@ -622,10 +705,16 @@ func (a *API) handleSessionQR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionPair(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
+		writeError(w, http.StatusForbidden, "access denied to this session")
 		return
 	}
 
@@ -651,10 +740,16 @@ func (a *API) handleSessionPair(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
+		writeError(w, http.StatusForbidden, "access denied to this session")
 		return
 	}
 
@@ -670,7 +765,16 @@ func (a *API) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
+	if sess, ok := a.sessions.GetSession(id); ok {
+		if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
+			writeError(w, http.StatusForbidden, "access denied to this session")
+			return
+		}
+	}
+
 	if err := a.sessions.DeleteSession(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -778,6 +882,8 @@ func (a *API) handleSendLocationMessage(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *API) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	limitStr := r.URL.Query().Get("limit")
 	limit := 50
@@ -785,7 +891,25 @@ func (a *API) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		limit = l
 	}
 
-	messages, err := a.store.ListMessages(r.Context(), id, limit)
+	var messages []store.MessageRecord
+	var err error
+
+	if id != "" {
+		if sess, ok := a.sessions.GetSession(id); ok {
+			if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
+				writeError(w, http.StatusForbidden, "access denied to session messages")
+				return
+			}
+		}
+		messages, err = a.store.ListMessages(r.Context(), id, limit)
+	} else if isAdmin {
+		messages, err = a.store.ListMessages(r.Context(), "", limit)
+	} else if userID != "" {
+		messages, err = a.store.ListMessagesByUser(r.Context(), userID, "", limit)
+	} else {
+		messages = []store.MessageRecord{}
+	}
+
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1138,7 +1262,19 @@ func (a *API) handleAudioStreamWS(w http.ResponseWriter, r *http.Request) {
 // ---------------- API Keys ----------------
 
 func (a *API) handleListKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := a.store.ListAPIKeys(r.Context())
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
+
+	var keys []store.APIKey
+	var err error
+	if isAdmin {
+		keys, err = a.store.ListAPIKeys(r.Context())
+	} else if userID != "" {
+		keys, err = a.store.ListAPIKeysByUser(r.Context(), userID)
+	} else {
+		keys = []store.APIKey{}
+	}
+
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1151,15 +1287,23 @@ func (a *API) handleListKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
+
 	var body struct {
 		Name string `json:"name"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Name == "" {
-		body.Name = "Default API Key"
+		body.Name = "Developer API Key"
 	}
 
-	key, err := a.store.CreateAPIKey(r.Context(), body.Name)
+	if !isAdmin && userID == "" {
+		writeError(w, http.StatusUnauthorized, "Authentication required to generate custom API keys")
+		return
+	}
+
+	key, err := a.store.CreateAPIKey(r.Context(), body.Name, userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1282,24 +1426,14 @@ func (a *API) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		user, _ = a.store.GetUserByPAT(r.Context(), token)
 	}
 	if user == nil && userID != "" {
-		user, _ = a.store.GetUserByPAT(r.Context(), "wac_pat_demo_master_token")
+		user, _ = a.store.GetUserByID(r.Context(), userID)
 	}
 	if user == nil {
-		user, _ = a.store.GetUserByEmail(r.Context(), "yasirubandaraprivate@gmail.com")
-	}
-	if user == nil {
-		user, _ = a.store.GetUserByPAT(r.Context(), "wac_pat_demo_master_token")
-	}
-	if user == nil {
-		user = &store.User{
-			ID:          "usr_admin_yasiru",
-			Name:        "Yasiru Bandara Private",
-			Email:       "yasirubandaraprivate@gmail.com",
-			Role:        "superadmin",
-			PATToken:    "wac_pat_demo_master_token",
-			TrialEndsAt: time.Now().UTC().Add(365 * 24 * time.Hour),
-			CreatedAt:   time.Now().UTC(),
-		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success": false,
+			"user":    nil,
+		})
+		return
 	}
 
 	sub, _ := a.store.GetSubscriptionByUserID(r.Context(), user.ID)
@@ -1328,6 +1462,21 @@ func (a *API) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		auth := r.Header.Get("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			token := strings.TrimPrefix(auth, "Bearer ")
+			if u, err := a.store.GetUserByPAT(r.Context(), token); err == nil && u != nil {
+				userID = u.ID
+			}
+		}
+	}
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "Authentication required to update profile")
+		return
+	}
+
 	var body struct {
 		Name  string `json:"name"`
 		Email string `json:"email"`
@@ -1335,15 +1484,6 @@ func (a *API) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" || body.Email == "" {
 		writeError(w, http.StatusBadRequest, "name and email are required")
 		return
-	}
-
-	userID := "usr_admin_yasiru"
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if u, err := a.store.GetUserByPAT(r.Context(), token); err == nil && u != nil {
-			userID = u.ID
-		}
 	}
 
 	user, err := a.store.UpdateUserProfile(r.Context(), userID, body.Name, body.Email)
@@ -1360,13 +1500,19 @@ func (a *API) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
-	userID := "usr_admin_yasiru"
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if u, err := a.store.GetUserByPAT(r.Context(), token); err == nil && u != nil {
-			userID = u.ID
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		auth := r.Header.Get("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			token := strings.TrimPrefix(auth, "Bearer ")
+			if u, err := a.store.GetUserByPAT(r.Context(), token); err == nil && u != nil {
+				userID = u.ID
+			}
 		}
+	}
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
 	}
 
 	_ = a.store.DeleteUser(r.Context(), userID)
@@ -1377,6 +1523,12 @@ func (a *API) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	if !isAdmin {
+		writeError(w, http.StatusForbidden, "Admin access required")
+		return
+	}
+
 	users, err := a.store.ListUsersWithSubscriptions(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1390,6 +1542,12 @@ func (a *API) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAdminGrantPlan(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	if !isAdmin {
+		writeError(w, http.StatusForbidden, "Admin access required")
+		return
+	}
+
 	userId := r.PathValue("userId")
 	if userId == "" {
 		writeError(w, http.StatusBadRequest, "user id required")
@@ -1422,7 +1580,7 @@ func (a *API) handleAdminGrantPlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	err := a.store.GrantPackage(r.Context(), userId, body.Plan, body.MaxSessions)
+	_, err := a.store.GrantPackage(r.Context(), userId, body.Plan, body.MaxSessions, 0)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to grant package: "+err.Error())
 		return
@@ -1435,6 +1593,12 @@ func (a *API) handleAdminGrantPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	if !isAdmin {
+		writeError(w, http.StatusForbidden, "Admin access required")
+		return
+	}
+
 	userId := r.PathValue("userId")
 	if userId == "" {
 		writeError(w, http.StatusBadRequest, "user id required")
@@ -1448,13 +1612,19 @@ func (a *API) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleRegeneratePAT(w http.ResponseWriter, r *http.Request) {
-	userID := "usr_admin_yasiru"
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if u, err := a.store.GetUserByPAT(r.Context(), token); err == nil && u != nil {
-			userID = u.ID
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		auth := r.Header.Get("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			token := strings.TrimPrefix(auth, "Bearer ")
+			if u, err := a.store.GetUserByPAT(r.Context(), token); err == nil && u != nil {
+				userID = u.ID
+			}
 		}
+	}
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "Authentication required to regenerate PAT")
+		return
 	}
 
 	newPAT, err := a.store.RegeneratePAT(r.Context(), userID)
@@ -1471,27 +1641,28 @@ func (a *API) handleRegeneratePAT(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleGetPATDetails(w http.ResponseWriter, r *http.Request) {
-	user, _ := a.store.GetUserByPAT(r.Context(), "wac_pat_demo_master_token")
-	if user == nil {
-		user, _ = a.store.GetUserByEmail(r.Context(), "yasirubandaraprivate@gmail.com")
+	var user *store.User
+	userID, _ := r.Context().Value("user_id").(string)
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		token := strings.TrimPrefix(auth, "Bearer ")
+		user, _ = a.store.GetUserByPAT(r.Context(), token)
 	}
-	if user == nil {
-		user, _ = a.store.CreateUser(r.Context(), "Yasiru Bandara Private", "yasirubandaraprivate@gmail.com", "password123")
+	if user == nil && userID != "" {
+		user, _ = a.store.GetUserByID(r.Context(), userID)
 	}
 
-	patToken := "wac_pat_demo_master_token"
-	createdAt := time.Now().UTC()
-	if user != nil {
-		patToken = user.PATToken
-		createdAt = user.CreatedAt
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Authentication required to view PAT details")
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"pat": map[string]any{
-			"token":       patToken,
-			"name":        "Personal Access Token (Default)",
-			"created_at":  createdAt,
+			"token":       user.PATToken,
+			"name":        fmt.Sprintf("%s's Personal Access Token", user.Name),
+			"created_at":  user.CreatedAt,
 			"permissions": []string{"sessions:manage", "calls:full", "messages:send", "webhooks:read"},
 		},
 	})
@@ -1500,13 +1671,25 @@ func (a *API) handleGetPATDetails(w http.ResponseWriter, r *http.Request) {
 // ---------------- Webhooks ----------------
 
 func (a *API) handleListWebhookLogs(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
+
 	limitStr := r.URL.Query().Get("limit")
 	limit := 50
 	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
 		limit = l
 	}
 
-	logs, err := a.store.ListWebhookLogs(r.Context(), limit)
+	var logs []store.WebhookLogRecord
+	var err error
+	if isAdmin {
+		logs, err = a.store.ListWebhookLogs(r.Context(), limit)
+	} else if userID != "" {
+		logs, err = a.store.ListWebhookLogsByUser(r.Context(), userID, limit)
+	} else {
+		logs = []store.WebhookLogRecord{}
+	}
+
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1549,9 +1732,15 @@ func (a *API) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 // ---------------- WasenderAPI Session Resolver & Helpers ----------------
 
 func (a *API) resolveSession(r *http.Request) (*session.Session, error) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
+
 	// 1. Path param "id"
 	if id := r.PathValue("id"); id != "" {
 		if sess, ok := a.sessions.GetSession(id); ok {
+			if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
+				return nil, fmt.Errorf("access denied to session %s", id)
+			}
 			return sess, nil
 		}
 	}
@@ -1566,6 +1755,9 @@ func (a *API) resolveSession(r *http.Request) (*session.Session, error) {
 	// 3. Header X-Session-ID
 	if headerID := r.Header.Get("X-Session-ID"); headerID != "" {
 		if sess, ok := a.sessions.GetSession(headerID); ok {
+			if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
+				return nil, fmt.Errorf("access denied to session %s", headerID)
+			}
 			return sess, nil
 		}
 	}
@@ -1573,11 +1765,31 @@ func (a *API) resolveSession(r *http.Request) (*session.Session, error) {
 	// 4. Query param session_id
 	if queryID := r.URL.Query().Get("session_id"); queryID != "" {
 		if sess, ok := a.sessions.GetSession(queryID); ok {
+			if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
+				return nil, fmt.Errorf("access denied to session %s", queryID)
+			}
 			return sess, nil
 		}
 	}
 
-	// 5. Fall back to first connected session (or first created session)
+	// 5. Fall back to user's first connected session or first created session
+	if !isAdmin && userID != "" {
+		userSessions := a.sessions.ListSessionsByUser(userID)
+		for _, s := range userSessions {
+			if s.Status == "CONNECTED" {
+				if realSess, ok := a.sessions.GetSession(s.ID); ok {
+					return realSess, nil
+				}
+			}
+		}
+		for _, s := range userSessions {
+			if realSess, ok := a.sessions.GetSession(s.ID); ok {
+				return realSess, nil
+			}
+		}
+		return nil, fmt.Errorf("no active WhatsApp session found for your account; please create and link a session first")
+	}
+
 	if sess, ok := a.sessions.FirstConnectedSession(); ok {
 		return sess, nil
 	}
@@ -1678,9 +1890,10 @@ func (a *API) handleWasenderSendCall(w http.ResponseWriter, r *http.Request) {
 // Top-level calls handlers (auto-resolved across sessions or by call ID)
 
 func (a *API) handleTopLevelListCalls(w http.ResponseWriter, r *http.Request) {
-	sess, err := a.resolveSession(r)
-	if err != nil {
-		// List all calls across all sessions
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
+
+	if isAdmin {
 		allActive := []session.CallInfo{}
 		for _, s := range a.sessions.ListSessions() {
 			if realSess, ok := a.sessions.GetSession(s.ID); ok {
@@ -1696,13 +1909,27 @@ func (a *API) handleTopLevelListCalls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeCalls := sess.ListCalls()
-	history, _ := a.store.ListCalls(r.Context(), sess.ID(), 30)
+	if userID != "" {
+		userSessions := a.sessions.ListSessionsByUser(userID)
+		allActive := []session.CallInfo{}
+		for _, s := range userSessions {
+			if realSess, ok := a.sessions.GetSession(s.ID); ok {
+				allActive = append(allActive, realSess.ListCalls()...)
+			}
+		}
+		history, _ := a.store.ListCallsByUser(r.Context(), userID, "", 50)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success":      true,
+			"active_calls": allActive,
+			"history":      history,
+		})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":      true,
-		"active_calls": activeCalls,
-		"history":      history,
+		"active_calls": []session.CallInfo{},
+		"history":      []store.CallRecord{},
 	})
 }
 

@@ -28,6 +28,7 @@ const (
 type SessionInfo struct {
 	ID         string        `json:"id"`
 	Name       string        `json:"name"`
+	UserID     string        `json:"user_id,omitempty"`
 	JID        string        `json:"jid,omitempty"`
 	Phone      string        `json:"phone,omitempty"`
 	Status     SessionStatus `json:"status"`

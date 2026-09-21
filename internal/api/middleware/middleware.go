@@ -76,6 +76,9 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 		if sessRec, err := m.store.GetSessionByAPIKey(r.Context(), key); err == nil && sessRec != nil {
 			ctx := context.WithValue(r.Context(), "session_id", sessRec.ID)
 			ctx = context.WithValue(ctx, "session_api_key", key)
+			if sessRec.UserID != "" {
+				ctx = context.WithValue(ctx, "user_id", sessRec.UserID)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -85,30 +88,34 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 			ctx := context.WithValue(r.Context(), "user_id", user.ID)
 			ctx = context.WithValue(ctx, "user_email", user.Email)
 			ctx = context.WithValue(ctx, "user_name", user.Name)
+			ctx = context.WithValue(ctx, "role", user.Role)
 			ctx = context.WithValue(ctx, "is_pat", true)
+			if user.Role == "superadmin" {
+				ctx = context.WithValue(ctx, "is_admin", true)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
 		// 3. Check if key is master key
 		if m.masterAPIKey != "" && key == m.masterAPIKey {
-			next.ServeHTTP(w, r)
+			ctx := context.WithValue(r.Context(), "is_admin", true)
+			ctx = context.WithValue(ctx, "role", "superadmin")
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
 		// 4. Check developer API key (wac_...)
-		if valid, _ := m.store.ValidateAPIKey(r.Context(), key); valid {
-			next.ServeHTTP(w, r)
+		if valid, k := m.store.ValidateAPIKey(r.Context(), key); valid && k != nil {
+			ctx := context.WithValue(r.Context(), "api_key_id", k.ID)
+			if k.UserID != "" {
+				ctx = context.WithValue(ctx, "user_id", k.UserID)
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
-		// 5. Fallback for default demo token
-		if key == "wac_pat_demo_master_token" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// 6. If no master key is set and no key passed, check if database has no custom keys
+		// 5. If no master key is set and no key passed, check if database has no custom keys
 		if key == "" && m.masterAPIKey == "" {
 			keys, _ := m.store.ListAPIKeys(r.Context())
 			if len(keys) == 0 {
@@ -144,18 +151,29 @@ func (m *Middleware) RequireOptionalAuth(next http.Handler) http.Handler {
 			if sessRec, err := m.store.GetSessionByAPIKey(r.Context(), key); err == nil && sessRec != nil {
 				ctx := context.WithValue(r.Context(), "session_id", sessRec.ID)
 				ctx = context.WithValue(ctx, "session_api_key", key)
+				if sessRec.UserID != "" {
+					ctx = context.WithValue(ctx, "user_id", sessRec.UserID)
+				}
 				r = r.WithContext(ctx)
 			} else if user, err := m.store.GetUserByPAT(r.Context(), key); err == nil && user != nil {
 				ctx := context.WithValue(r.Context(), "user_id", user.ID)
 				ctx = context.WithValue(ctx, "user_email", user.Email)
 				ctx = context.WithValue(ctx, "user_name", user.Name)
+				ctx = context.WithValue(ctx, "role", user.Role)
 				ctx = context.WithValue(ctx, "is_pat", true)
 				if user.Role == "superadmin" {
 					ctx = context.WithValue(ctx, "is_admin", true)
 				}
 				r = r.WithContext(ctx)
+			} else if valid, k := m.store.ValidateAPIKey(r.Context(), key); valid && k != nil {
+				ctx := context.WithValue(r.Context(), "api_key_id", k.ID)
+				if k.UserID != "" {
+					ctx = context.WithValue(ctx, "user_id", k.UserID)
+				}
+				r = r.WithContext(ctx)
 			} else if m.masterAPIKey != "" && key == m.masterAPIKey {
 				ctx := context.WithValue(r.Context(), "is_admin", true)
+				ctx = context.WithValue(ctx, "role", "superadmin")
 				r = r.WithContext(ctx)
 			}
 		}

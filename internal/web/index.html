@@ -834,9 +834,9 @@
         <!-- Profile Popup Menu (WasenderAPI style) -->
         <div id="profile-popup-menu" class="profile-popup-menu">
           <div class="popup-menu-header">
-            <div class="popup-menu-name" id="popup-menu-name">Yasiru Bandara Private</div>
-            <div class="popup-menu-email" id="popup-menu-email">yasirubandaraprivate@gmail.com</div>
-            <div style="margin-top:0.35rem;"><span class="status-pill connected" style="font-size:0.65rem;" id="popup-menu-role">Superadmin</span></div>
+            <div class="popup-menu-name" id="popup-menu-name">Guest Developer</div>
+            <div class="popup-menu-email" id="popup-menu-email">Click below to Sign In</div>
+            <div style="margin-top:0.35rem;"><span class="status-pill disconnected" style="font-size:0.65rem;" id="popup-menu-role">Guest</span></div>
           </div>
           <div class="popup-menu-item" onclick="toggleProfileMenu(); switchConsoleView('settings'); switchSettingsTab('profile');">
             <span>⚙️</span> Profile Settings
@@ -844,7 +844,7 @@
           <div class="popup-menu-item" onclick="toggleProfileMenu(); switchConsoleView('settings'); switchSettingsTab('pat');">
             <span>🔑</span> Personal Access Tokens
           </div>
-          <div class="popup-menu-item" id="popup-admin-users-btn" onclick="toggleProfileMenu(); switchConsoleView('admin-users');">
+          <div class="popup-menu-item" id="popup-admin-users-btn" style="display:none;" onclick="toggleProfileMenu(); switchConsoleView('admin-users');">
             <span>👥</span> Users &amp; Packages
           </div>
           <div class="popup-menu-item" onclick="toggleProfileMenu(); openAuthModal();">
@@ -857,11 +857,11 @@
         </div>
 
         <!-- Interactive User Profile Card -->
-        <div class="user-profile-card" onclick="toggleProfileMenu()" title="Display a menu">
-          <div class="user-avatar" id="sidebar-avatar">YP</div>
+        <div class="user-profile-card" onclick="toggleProfileMenu()" title="Display user menu">
+          <div class="user-avatar" id="sidebar-avatar">GD</div>
           <div class="user-meta">
-            <div class="user-name" id="sidebar-user-name">Yasiru Bandara Private</div>
-            <div class="user-role" id="sidebar-user-role">Administrator</div>
+            <div class="user-name" id="sidebar-user-name">Guest Developer</div>
+            <div class="user-role" id="sidebar-user-role">Click to Sign In</div>
           </div>
           <svg style="width:14px; height:14px; opacity:0.5;" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l4-4 4 4m0 6l-4 4-4-4"/></svg>
         </div>
@@ -1671,12 +1671,12 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
 
                 <div class="input-group" style="max-width:540px;">
                   <label>Name</label>
-                  <input type="text" id="settings-name-input" class="input-control" value="Yasiru Bandara Private" />
+                  <input type="text" id="settings-name-input" class="input-control" placeholder="Developer / Company Name" />
                 </div>
 
                 <div class="input-group" style="max-width:540px;">
                   <label>Email address</label>
-                  <input type="email" id="settings-email-input" class="input-control" value="yasirubandaraprivate@gmail.com" />
+                  <input type="email" id="settings-email-input" class="input-control" placeholder="developer@company.com" />
                 </div>
 
                 <button class="btn btn-primary btn-sm" style="margin-top:0.5rem;" onclick="saveProfileInfo()">Save</button>
@@ -1720,7 +1720,7 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
 
                 <div class="card" style="max-width:640px;">
                   <div class="card-title" style="margin-bottom:0.5rem;">cURL Quick Test Example</div>
-                  <div class="code-box">curl -X GET https://wacaller.bandara.me/api/v1/sessions \
+                  <div class="code-box">curl -X GET https://api.wacaller.com/api/v1/sessions \
   -H "Authorization: Bearer <span id="curl-pat-preview">wac_pat_...</span>"</div>
                 </div>
               </div>
@@ -1804,8 +1804,8 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
                     <tbody>
                       <tr>
                         <td>
-                          <div style="font-weight:600; color:#fff;" id="team-owner-name">Yasiru Bandara Private</div>
-                          <div style="font-size:0.75rem; color:var(--text-muted);" id="team-owner-email">yasirubandaraprivate@gmail.com</div>
+                          <div style="font-weight:600; color:#fff;" id="team-owner-name">Developer Account</div>
+                          <div style="font-size:0.75rem; color:var(--text-muted);" id="team-owner-email">developer@company.com</div>
                         </td>
                         <td><span class="status-pill connected" style="font-size:0.7rem;">Owner</span></td>
                         <td>Active</td>
@@ -1953,8 +1953,8 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
       </p>
       <div class="card" style="margin-bottom:1rem;">
         <div style="font-weight:600; color:#fff; font-size:0.85rem;">Developer Support</div>
-        <div style="font-size:0.78rem; color:var(--text-muted); margin-top:0.25rem;">Email: <strong style="color:#60a5fa;">support@wacaller.bandara.me</strong></div>
-        <div style="font-size:0.78rem; color:var(--text-muted); margin-top:0.25rem;">Founder: <strong style="color:#60a5fa;">yasirubandaraprivate@gmail.com</strong></div>
+        <div style="font-size:0.78rem; color:var(--text-muted); margin-top:0.25rem;">Email: <strong style="color:#60a5fa;">support@wacaller.dev</strong></div>
+        <div style="font-size:0.78rem; color:var(--text-muted); margin-top:0.25rem;">Discord: <strong style="color:#60a5fa;">discord.gg/wacaller</strong></div>
       </div>
       <button class="btn btn-outline btn-sm" style="width:100%;" onclick="closeContactUsModal()">Close</button>
     </div>
@@ -1980,11 +1980,11 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
         </p>
         <div class="input-group">
           <label>Email Address</label>
-          <input type="email" id="auth-login-email" class="input-control" placeholder="developer@company.com" value="yasirubandaraprivate@gmail.com" />
+          <input type="email" id="auth-login-email" class="input-control" placeholder="developer@company.com" />
         </div>
         <div class="input-group">
           <label>Password</label>
-          <input type="password" id="auth-login-pwd" class="input-control" placeholder="••••••••" value="password123" />
+          <input type="password" id="auth-login-pwd" class="input-control" placeholder="••••••••" />
         </div>
         <button class="btn btn-primary btn-sm" style="width:100%; margin-top:0.5rem;" onclick="handleClientLogin()">Sign In</button>
       </div>
@@ -2150,7 +2150,7 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
 
   <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js"></script>
   <script>
-    let activeAuthToken = localStorage.getItem('wac_auth_token') || "wac_pat_demo_master_token";
+    let activeAuthToken = localStorage.getItem('wac_auth_token') || "";
     let currentUserProfile = null;
     let cachedSessions = [];
     let currentConsoleView = 'dashboard';
@@ -2364,9 +2364,15 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
 
     async function loadUserProfile() {
       try {
+        if (!activeAuthToken) {
+          currentUserProfile = null;
+          updateGuestUI();
+          return;
+        }
+
         const res = await fetch('/api/v1/auth/me', { headers: getAuthHeaders() });
         const data = await res.json();
-        if (data.user) {
+        if (data.success && data.user) {
           currentUserProfile = data.user;
           const sub = data.subscription || {};
 
@@ -2390,16 +2396,16 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
           const initials = (currentUserProfile.name || 'User').split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
           if (avatar) avatar.innerText = initials || 'US';
 
-          if (sideName) sideName.innerText = currentUserProfile.name || 'User';
+          if (sideName) sideName.innerText = currentUserProfile.name || 'Developer';
           if (sideRole) sideRole.innerText = currentUserProfile.role === 'superadmin' ? 'Superadmin' : 'Developer';
           if (topRole) topRole.innerText = currentUserProfile.role === 'superadmin' ? 'Superadmin' : 'Developer';
-          if (popupName) popupName.innerText = currentUserProfile.name || 'User';
+          if (popupName) popupName.innerText = currentUserProfile.name || 'Developer';
           if (popupEmail) popupEmail.innerText = currentUserProfile.email || '';
           if (popupRole) {
             popupRole.innerText = currentUserProfile.role === 'superadmin' ? 'Superadmin' : 'Developer';
             popupRole.className = 'status-pill ' + (currentUserProfile.role === 'superadmin' ? 'connected' : 'disconnected');
           }
-          if (teamName) teamName.innerText = currentUserProfile.name || 'User';
+          if (teamName) teamName.innerText = currentUserProfile.name || 'Developer';
           if (teamEmail) teamEmail.innerText = currentUserProfile.email || '';
 
           // Admin nav & popup items
@@ -2419,9 +2425,9 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
           const bannerDesc = document.getElementById('settings-banner-desc');
           const bannerBtn = document.getElementById('settings-banner-action-btn');
 
-          if (data.is_trial) {
+          if (currentUserProfile.is_trial) {
             if (bannerIcon) bannerIcon.innerText = '⏳';
-            if (bannerTitle) bannerTitle.innerText = `7-Day Free Trial (${data.trial_days_left || 7} Days Remaining)`;
+            if (bannerTitle) bannerTitle.innerText = `7-Day Free Trial (${currentUserProfile.days_left || 7} Days Remaining)`;
             if (bannerDesc) bannerDesc.innerText = 'Your free developer trial is active with full WhatsApp calling and messaging. Upgrade anytime to maintain unlimited access.';
             if (bannerBtn) { bannerBtn.innerText = 'Upgrade Subscription'; bannerBtn.onclick = () => switchConsoleView('subscription'); }
           } else if (sub.status === 'active') {
@@ -2438,23 +2444,66 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
 
           // Update PAT display
           renderSettingsPAT();
+        } else {
+          currentUserProfile = null;
+          updateGuestUI();
         }
       } catch (e) {
         console.error("loadUserProfile error:", e);
+        currentUserProfile = null;
+        updateGuestUI();
       }
     }
 
+    function updateGuestUI() {
+      const sideName = document.getElementById('sidebar-user-name');
+      const sideRole = document.getElementById('sidebar-user-role');
+      const topRole = document.getElementById('topbar-auth-role');
+      const avatar = document.getElementById('sidebar-avatar');
+      const teamName = document.getElementById('team-owner-name');
+      const teamEmail = document.getElementById('team-owner-email');
+      const popupName = document.getElementById('popup-menu-name');
+      const popupEmail = document.getElementById('popup-menu-email');
+      const popupRole = document.getElementById('popup-menu-role');
+
+      if (avatar) avatar.innerText = 'G';
+      if (sideName) sideName.innerText = 'Guest Developer';
+      if (sideRole) sideRole.innerText = 'Click to Sign In';
+      if (topRole) topRole.innerText = 'Guest (Sign in / Register)';
+      if (popupName) popupName.innerText = 'Guest Developer';
+      if (popupEmail) popupEmail.innerText = 'Not signed in';
+      if (popupRole) {
+        popupRole.innerText = 'Guest';
+        popupRole.className = 'status-pill disconnected';
+      }
+      if (teamName) teamName.innerText = 'Workspace Owner';
+      if (teamEmail) teamEmail.innerText = 'guest@wacaller.local';
+
+      const navUsers = document.getElementById('nav-item-users');
+      const navSystem = document.getElementById('nav-item-system');
+      const popupAdminUsers = document.getElementById('popup-admin-users-btn');
+      if (navUsers) navUsers.style.display = 'none';
+      if (navSystem) navSystem.style.display = 'none';
+      if (popupAdminUsers) popupAdminUsers.style.display = 'none';
+
+      renderSettingsPAT();
+    }
+
     function renderSettingsPAT() {
-      const pat = currentUserProfile?.pat || activeAuthToken || MASTER_PAT;
+      const pat = currentUserProfile?.pat_token || activeAuthToken || '';
       const display = document.getElementById('settings-pat-display');
       const curlPat = document.getElementById('curl-pat-preview');
       const toggleBtn = document.getElementById('btn-settings-toggle-pat');
 
       if (display) {
-        display.innerText = settingsPATRevealed ? pat : 'wac_pat_••••••••••••••••••••••••••••••••••••••••';
+        if (!pat) {
+          display.innerText = '(Sign in or generate a PAT)';
+        } else {
+          display.innerText = settingsPATRevealed ? pat : 'wac_pat_••••••••••••••••••••••••••••••••••••••••';
+        }
       }
       if (curlPat) {
-        curlPat.innerText = settingsPATRevealed ? pat : 'wac_pat_...';
+        curlPat.innerText = (!pat) ? '<YOUR_PAT_TOKEN>' : (settingsPATRevealed ? pat : 'wac_pat_...');
       }
       if (toggleBtn) {
         toggleBtn.innerText = settingsPATRevealed ? 'Hide' : 'Reveal';
@@ -2467,7 +2516,12 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
     }
 
     function copySettingsPAT() {
-      const pat = currentUserProfile?.pat || activeAuthToken || MASTER_PAT;
+      const pat = currentUserProfile?.pat_token || activeAuthToken || '';
+      if (!pat) {
+        alert("Please sign in or register to get your Personal Access Token.");
+        openAuthModal('signin');
+        return;
+      }
       navigator.clipboard.writeText(pat);
       alert("Personal Access Token (PAT) copied to clipboard.");
     }
@@ -3173,8 +3227,13 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
 
     function loadPAT() {
       const el = document.getElementById('master-pat-display');
+      const pat = currentUserProfile?.pat_token || activeAuthToken || '';
       if (el) {
-        el.innerText = patRevealed ? MASTER_PAT : 'wac_pat_••••••••••••••••••••••••••••••••••••••••';
+        if (!pat) {
+          el.innerText = '(Sign in or generate a PAT)';
+        } else {
+          el.innerText = patRevealed ? pat : 'wac_pat_••••••••••••••••••••••••••••••••••••••••';
+        }
       }
     }
 
@@ -3186,13 +3245,36 @@ Body: { "event": "message.received", "from": "+9471...", "text": "Hello" }</div>
     }
 
     function copyPAT() {
-      navigator.clipboard.writeText(MASTER_PAT);
-      alert("Master Personal Access Token copied to clipboard.");
+      const pat = currentUserProfile?.pat_token || activeAuthToken || '';
+      if (!pat) {
+        alert("Please sign in or register to get your Personal Access Token.");
+        openAuthModal('signin');
+        return;
+      }
+      navigator.clipboard.writeText(pat);
+      alert("Personal Access Token (PAT) copied to clipboard.");
     }
 
-    function regeneratePAT() {
-      if (confirm("Regenerate Master Personal Access Token? All services using the previous token will need to be updated.")) {
-        alert("Master PAT regenerated successfully.");
+    async function regeneratePAT() {
+      if (!confirm("Regenerate your Personal Access Token? All services and automated integrations using the previous token will need to be updated.")) return;
+      try {
+        const res = await fetch('/api/v1/auth/pat/regenerate', {
+          method: 'POST',
+          headers: getAuthHeaders()
+        });
+        const data = await res.json();
+        if (data.pat_token) {
+          activeAuthToken = data.pat_token;
+          localStorage.setItem('wac_auth_token', activeAuthToken);
+          if (currentUserProfile) currentUserProfile.pat_token = data.pat_token;
+          loadPAT();
+          renderSettingsPAT();
+          alert("New Personal Access Token generated and saved.");
+        } else {
+          alert("Error: " + (data.error || "Failed to regenerate PAT"));
+        }
+      } catch (e) {
+        alert("Error: " + e.message);
       }
     }
 

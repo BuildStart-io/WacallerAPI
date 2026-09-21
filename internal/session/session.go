@@ -29,6 +29,7 @@ import (
 type Session struct {
 	id         string
 	name       string
+	userID     string
 	apiKey     string
 	client     *whatsmeow.Client
 	store      *store.Store
@@ -44,10 +45,11 @@ type Session struct {
 	calls      map[string]*CallContext
 }
 
-func newSession(id, name, apiKey string, client *whatsmeow.Client, st *store.Store, disp *webhook.Dispatcher, log *slog.Logger, maxCalls int, webhookURL string) *Session {
+func newSession(id, name, apiKey string, client *whatsmeow.Client, st *store.Store, disp *webhook.Dispatcher, log *slog.Logger, maxCalls int, webhookURL, userID string) *Session {
 	s := &Session{
 		id:         id,
 		name:       name,
+		userID:     userID,
 		apiKey:     apiKey,
 		client:     client,
 		store:      st,
@@ -65,6 +67,12 @@ func newSession(id, name, apiKey string, client *whatsmeow.Client, st *store.Sto
 
 func (s *Session) ID() string {
 	return s.id
+}
+
+func (s *Session) UserID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.userID
 }
 
 func (s *Session) Name() string {
@@ -89,7 +97,7 @@ func (s *Session) SetWebhookURL(ctx context.Context, u string) error {
 	s.mu.Lock()
 	s.webhookURL = u
 	s.mu.Unlock()
-	return s.store.UpsertSession(ctx, s.id, s.name, s.getJID(), string(s.status), u, s.apiKey)
+	return s.store.UpsertSession(ctx, s.id, s.name, s.getJID(), string(s.status), u, s.apiKey, s.userID)
 }
 
 func (s *Session) getJID() string {
@@ -112,6 +120,7 @@ func (s *Session) Info() SessionInfo {
 	return SessionInfo{
 		ID:         s.id,
 		Name:       s.name,
+		UserID:     s.userID,
 		JID:        jid,
 		Phone:      phone,
 		Status:     s.status,
@@ -233,7 +242,7 @@ func (s *Session) Logout(ctx context.Context) error {
 	s.currentQR = ""
 	s.mu.Unlock()
 
-	_ = s.store.UpsertSession(ctx, s.id, s.name, "", string(StatusLoggedOut), s.webhookURL, s.apiKey)
+	_ = s.store.UpsertSession(ctx, s.id, s.name, "", string(StatusLoggedOut), s.webhookURL, s.apiKey, s.userID)
 	s.dispatcher.Dispatch(s.id, s.webhookURL, webhook.EventSessionDisconnected, map[string]string{
 		"reason": "user_logout",
 	})
@@ -262,7 +271,7 @@ func (s *Session) handleEvent(rawEvt any) {
 		jid := s.getJID()
 		s.mu.Unlock()
 
-		_ = s.store.UpsertSession(ctx, s.id, s.name, jid, string(StatusConnected), s.webhookURL, s.apiKey)
+		_ = s.store.UpsertSession(ctx, s.id, s.name, jid, string(StatusConnected), s.webhookURL, s.apiKey, s.userID)
 		s.log.Info("WhatsApp connected", "jid", jid)
 		s.dispatcher.Dispatch(s.id, s.webhookURL, webhook.EventSessionConnected, map[string]string{
 			"jid":   jid,
@@ -275,7 +284,7 @@ func (s *Session) handleEvent(rawEvt any) {
 		s.currentQR = ""
 		s.mu.Unlock()
 
-		_ = s.store.UpsertSession(ctx, s.id, s.name, "", string(StatusLoggedOut), s.webhookURL, s.apiKey)
+		_ = s.store.UpsertSession(ctx, s.id, s.name, "", string(StatusLoggedOut), s.webhookURL, s.apiKey, s.userID)
 		s.log.Warn("WhatsApp logged out by phone", "reason", evt.Reason.String())
 		s.dispatcher.Dispatch(s.id, s.webhookURL, webhook.EventSessionDisconnected, map[string]string{
 			"reason": evt.Reason.String(),
