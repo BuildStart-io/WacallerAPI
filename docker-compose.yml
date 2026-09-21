@@ -1,0 +1,21 @@
+services:
+  wacaller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wacaller-api
+    restart: always
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
