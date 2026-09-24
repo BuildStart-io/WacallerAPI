@@ -86,7 +86,9 @@ func (a *API) Routes() http.Handler {
 
 	// Sessions Management (Zero friction - no PAT required!)
 	publicMux.HandleFunc("GET /sessions", a.handleSessionList)
+	publicMux.HandleFunc("GET /sessions/", a.handleSessionList)
 	publicMux.HandleFunc("POST /sessions", a.handleSessionCreate)
+	publicMux.HandleFunc("POST /sessions/", a.handleSessionCreate)
 	publicMux.HandleFunc("POST /create-session", a.handleSessionCreate)
 	publicMux.HandleFunc("GET /sessions/{id}", a.handleSessionGet)
 	publicMux.HandleFunc("GET /sessions/{id}/qr", a.handleSessionQR)
@@ -631,9 +633,18 @@ func (a *API) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name       string `json:"name"`
 		WebhookURL string `json:"webhook_url"`
+		WebhookUrl string `json:"webhookUrl"`
 		UserID     string `json:"user_id"`
+		UserId     string `json:"userId"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	if body.WebhookURL == "" && body.WebhookUrl != "" {
+		body.WebhookURL = body.WebhookUrl
+	}
+	if body.UserID == "" && body.UserId != "" {
+		body.UserID = body.UserId
+	}
 
 	// Admin / M2M requests can specify target user_id (org_uuid) in payload
 	if isAdmin && body.UserID != "" {
@@ -670,12 +681,27 @@ func (a *API) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	info := sess.Info()
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"success":   true,
-		"session":   info,
-		"apiKey":    info.APIKey,
-		"sessionId": info.ID,
-		"status":    info.Status,
-		"qr":        info.QR,
+		"success":    true,
+		"id":         info.ID,
+		"session_id": info.ID,
+		"sessionId":  info.ID,
+		"name":       info.Name,
+		"user_id":    info.UserID,
+		"userId":     info.UserID,
+		"status":     info.Status,
+		"qr":         info.QR,
+		"qr_code":    info.QR,
+		"apiKey":     info.APIKey,
+		"api_key":    info.APIKey,
+		"session":    info,
+		"data": map[string]any{
+			"id":         info.ID,
+			"session_id": info.ID,
+			"name":       info.Name,
+			"status":     info.Status,
+			"qr":         info.QR,
+			"api_key":    info.APIKey,
+		},
 	})
 }
 
