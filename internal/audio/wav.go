@@ -2,13 +2,14 @@ package audio
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"time"
 
+	"wacallerapi/internal/safenet"
 	"wacallerapi/internal/voip/media"
 )
 
@@ -96,19 +97,17 @@ func DecodeWAVToPCM16k(r io.Reader) ([]float32, error) {
 }
 
 // FetchAudioFromURL downloads audio from an HTTP URL and decodes it to 16 kHz float32 PCM.
+// Phase 0 Task 12: Uses SSRF-safe HTTP client with response size limit.
 func FetchAudioFromURL(url string) ([]float32, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	data, err := safenet.SafeGet(ctx, url)
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch audio url, status: %d", resp.StatusCode)
+		return nil, fmt.Errorf("ssrf-safe audio fetch failed: %w", err)
 	}
 
-	return DecodeWAVToPCM16k(resp.Body)
+	return DecodeWAVToPCM16k(bytes.NewReader(data))
 }
 
 // EncodePCM16kToWAV encodes 16 kHz mono float32 PCM samples to standard 16-bit WAV bytes.

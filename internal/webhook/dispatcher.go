@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"wacallerapi/internal/safenet"
 	"wacallerapi/internal/store"
 )
 
@@ -57,9 +58,7 @@ type job struct {
 
 func NewDispatcher(st *store.Store, defaultURL, secret string, log *slog.Logger) *Dispatcher {
 	d := &Dispatcher{
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		client:        safenet.NewSafeClient(),
 		store:         st,
 		defaultURL:    defaultURL,
 		signingSecret: secret,

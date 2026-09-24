@@ -2,9 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -76,7 +80,8 @@ func (a *API) Routes() http.Handler {
 	publicMux.HandleFunc("POST /billing/checkout", a.handleStripeCheckout)
 	publicMux.HandleFunc("POST /billing/webhook", a.handleStripeWebhook)
 	publicMux.HandleFunc("GET /billing/subscription", a.handleGetSubscription)
-	publicMux.HandleFunc("POST /billing/activate-plan", a.handleDirectActivatePlan)
+	// REMOVED: Direct plan activation removed from public routes (Phase 0 — Security)
+	// Plan activation is now admin-only via /admin/users/{userId}/grant-plan
 
 	// API Keys Management (Zero friction - no PAT required!)
 	publicMux.HandleFunc("GET /keys", a.handleListKeys)
@@ -152,7 +157,10 @@ func (a *API) Routes() http.Handler {
 	rootMux.Handle("/api/v1/", http.StripPrefix("/api/v1", apiHandler))
 	rootMux.Handle("/api/", http.StripPrefix("/api", apiHandler))
 
-	return a.mw.CORS(a.mw.Logger(rootMux))
+	// Phase 0 Task 11 & 13: Apply rate limiting and 10MB body size limit
+	bodyLimited := a.mw.BodySizeLimit(10 * 1024 * 1024)(rootMux)
+	rateLimited := a.mw.RateLimit(100.0/60.0, 20)(a.mw.CORS(a.mw.Logger(bodyLimited)))
+	return rateLimited.(http.Handler)
 }
 
 func isActionProtected(path string, method string) bool {
@@ -431,37 +439,56 @@ func (a *API) handleStripeCheckout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. Fallback / Instant Developer Simulator: Activate subscription immediately
-	_ = a.store.CreateOrUpdateSubscription(r.Context(), &store.SubscriptionRecord{
-		UserID:          userID,
-		Plan:            planID,
-		Status:          "active",
-		MaxSessions:     planInfo.MaxSessions,
-		StripeSessionID: "cs_simulated_" + strconv.FormatInt(time.Now().UnixNano(), 36),
-		AmountCents:     planInfo.AmountCents,
-		Currency:        "usd",
-	})
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success":      true,
-		"checkout_url": successURL,
-		"session_id":   "cs_simulated_" + strconv.FormatInt(time.Now().UnixNano(), 36),
-		"mode":         "simulated_instant",
-		"message":      fmt.Sprintf("Plan upgraded to %s successfully!", planInfo.Name),
-		"plan":         planInfo,
-	})
+	// Phase 0: Billing fallback removed — no free plan activation
+	writeError(w, http.StatusServiceUnavailable, "Billing is not configured or Stripe request failed. Please contact support.")
 }
 
 func (a *API) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
+	// Phase 0: Read raw body for signature verification
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB max
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	// Phase 0: Verify Stripe webhook signature
+	if a.cfg.StripeWebhookSecret != "" {
+		sigHeader := r.Header.Get("Stripe-Signature")
+		if sigHeader == "" {
+			a.log.Warn("stripe webhook: missing Stripe-Signature header")
+			writeError(w, http.StatusBadRequest, "missing Stripe-Signature header")
+			return
+		}
+		if !verifyStripeSignature(rawBody, sigHeader, a.cfg.StripeWebhookSecret) {
+			a.log.Warn("stripe webhook: invalid signature")
+			writeError(w, http.StatusBadRequest, "invalid webhook signature")
+			return
+		}
+	} else {
+		a.log.Warn("stripe webhook: STRIPE_WEBHOOK_SECRET not configured, rejecting webhook")
+		writeError(w, http.StatusServiceUnavailable, "webhook verification not configured")
+		return
+	}
+
 	var event struct {
+		ID   string `json:"id"`
 		Type string `json:"type"`
 		Data struct {
 			Object map[string]any `json:"object"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+	if err := json.Unmarshal(rawBody, &event); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid payload")
 		return
+	}
+
+	// Phase 0: Event ID deduplication
+	if event.ID != "" {
+		if a.store.IsStripeEventProcessed(r.Context(), event.ID) {
+			a.log.Info("stripe webhook: duplicate event, skipping", "event_id", event.ID)
+			writeJSON(w, http.StatusOK, map[string]any{"received": true})
+			return
+		}
 	}
 
 	switch event.Type {
@@ -509,6 +536,11 @@ func (a *API) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 				Status: "canceled",
 			})
 		}
+	}
+
+	// Mark event as processed for deduplication
+	if event.ID != "" {
+		_ = a.store.MarkStripeEventProcessed(r.Context(), event.ID, event.Type)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -560,41 +592,82 @@ func (a *API) handleGetSubscription(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *API) handleDirectActivatePlan(w http.ResponseWriter, r *http.Request) {
-	userID, _ := r.Context().Value("user_id").(string)
-	if userID == "" {
-		writeError(w, http.StatusUnauthorized, "Authentication required to activate plan.")
-		return
+// Phase 0: Direct plan activation removed from customer-facing routes.
+// Use /admin/users/{userId}/grant-plan for admin-only plan grants.
+
+// verifyStripeSignature verifies a Stripe webhook signature.
+// Stripe signs webhooks using HMAC-SHA256 with the format:
+// t=<timestamp>,v1=<signature>
+func verifyStripeSignature(payload []byte, sigHeader, secret string) bool {
+	var timestamp, signature string
+	for _, part := range strings.Split(sigHeader, ",") {
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch kv[0] {
+		case "t":
+			timestamp = kv[1]
+		case "v1":
+			signature = kv[1]
+		}
+	}
+	if timestamp == "" || signature == "" {
+		return false
 	}
 
-	var body struct {
-		Plan string `json:"plan"`
+	// Reject events older than 5 minutes to prevent replay attacks
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return false
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-
-	planID := strings.ToLower(strings.TrimSpace(body.Plan))
-	planInfo, exists := AvailablePlans[planID]
-	if !exists {
-		planInfo = AvailablePlans["basic"]
+	if time.Since(time.Unix(ts, 0)).Abs() > 5*time.Minute {
+		return false
 	}
 
-	_ = a.store.CreateOrUpdateSubscription(r.Context(), &store.SubscriptionRecord{
-		UserID:      userID,
-		Plan:        planInfo.ID,
-		Status:      "active",
-		MaxSessions: planInfo.MaxSessions,
-		AmountCents: planInfo.AmountCents,
-		Currency:    "usd",
-	})
+	// Compute expected signature: HMAC-SHA256(secret, "timestamp.payload")
+	signed := fmt.Sprintf("%s.%s", timestamp, string(payload))
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signed))
+	expected := hex.EncodeToString(mac.Sum(nil))
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success":      true,
-		"message":      fmt.Sprintf("Subscription updated to %s ($%d/mo, %d lines max)", planInfo.Name, planInfo.PriceUSD, planInfo.MaxSessions),
-		"current_plan": planInfo,
-	})
+	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
+// requireSessionOwnership checks that the authenticated principal owns the session.
+// Returns true if access is DENIED (caller should return immediately).
+// Phase 0: Fix for broken ownership checks that let unauthenticated users bypass authorization.
+func (a *API) requireSessionOwnership(w http.ResponseWriter, r *http.Request, sess *session.Session) bool {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	if isAdmin {
+		return false // admin has access
+	}
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return true // denied
+	}
+	if sess.UserID() != "" && sess.UserID() != userID {
+		writeError(w, http.StatusForbidden, "access denied to this session")
+		return true // denied
+	}
+	return false // allowed
+}
 
+// requireAuth checks that the request has an authenticated principal.
+// Returns the userID or writes an error and returns "" if unauthenticated.
+func (a *API) requireAuth(w http.ResponseWriter, r *http.Request) (string, bool) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	if isAdmin {
+		return "__admin__", true
+	}
+	userID, _ := r.Context().Value("user_id").(string)
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return "", false
+	}
+	return userID, true
+}
 // ---------------- Sessions ----------------
 
 func (a *API) handleSessionList(w http.ResponseWriter, r *http.Request) {
@@ -663,16 +736,14 @@ func (a *API) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionGet(w http.ResponseWriter, r *http.Request) {
-	isAdmin, _ := r.Context().Value("is_admin").(bool)
-	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
-		writeError(w, http.StatusForbidden, "access denied to this session")
+	// Phase 0: Fixed ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -683,16 +754,14 @@ func (a *API) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionQR(w http.ResponseWriter, r *http.Request) {
-	isAdmin, _ := r.Context().Value("is_admin").(bool)
-	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
-		writeError(w, http.StatusForbidden, "access denied to this session")
+	// Phase 0: Fixed ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -705,16 +774,14 @@ func (a *API) handleSessionQR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionPair(w http.ResponseWriter, r *http.Request) {
-	isAdmin, _ := r.Context().Value("is_admin").(bool)
-	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
-		writeError(w, http.StatusForbidden, "access denied to this session")
+	// Phase 0: Fixed ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -740,16 +807,14 @@ func (a *API) handleSessionPair(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
-	isAdmin, _ := r.Context().Value("is_admin").(bool)
-	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
-		writeError(w, http.StatusForbidden, "access denied to this session")
+	// Phase 0: Fixed ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -765,12 +830,15 @@ func (a *API) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
-	isAdmin, _ := r.Context().Value("is_admin").(bool)
-	userID, _ := r.Context().Value("user_id").(string)
 	id := r.PathValue("id")
 	if sess, ok := a.sessions.GetSession(id); ok {
-		if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
-			writeError(w, http.StatusForbidden, "access denied to this session")
+		// Phase 0: Fixed ownership check
+		if a.requireSessionOwnership(w, r, sess) {
+			return
+		}
+	} else {
+		// Phase 0: Require auth even if session doesn't exist in memory
+		if _, ok := a.requireAuth(w, r); !ok {
 			return
 		}
 	}
@@ -793,6 +861,10 @@ func (a *API) handleSendTextMessage(w http.ResponseWriter, r *http.Request) {
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -823,6 +895,10 @@ func (a *API) handleSendMediaMessage(w http.ResponseWriter, r *http.Request) {
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -856,6 +932,10 @@ func (a *API) handleSendLocationMessage(w http.ResponseWriter, r *http.Request) 
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -896,8 +976,8 @@ func (a *API) handleListMessages(w http.ResponseWriter, r *http.Request) {
 
 	if id != "" {
 		if sess, ok := a.sessions.GetSession(id); ok {
-			if !isAdmin && userID != "" && sess.UserID() != "" && sess.UserID() != userID {
-				writeError(w, http.StatusForbidden, "access denied to session messages")
+			// Phase 0: Fixed ownership check
+			if a.requireSessionOwnership(w, r, sess) {
 				return
 			}
 		}
@@ -928,6 +1008,10 @@ func (a *API) handleStartCall(w http.ResponseWriter, r *http.Request) {
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -968,6 +1052,10 @@ func (a *API) handleListCalls(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
+		return
+	}
 
 	// Active calls from memory
 	activeCalls := sess.ListCalls()
@@ -989,6 +1077,10 @@ func (a *API) handleGetCall(w http.ResponseWriter, r *http.Request) {
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -1027,6 +1119,10 @@ func (a *API) handleAcceptCall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
+		return
+	}
 
 	if err := sess.AcceptCall(r.Context(), callID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1046,6 +1142,10 @@ func (a *API) handleRejectCall(w http.ResponseWriter, r *http.Request) {
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -1069,6 +1169,10 @@ func (a *API) handleEndCall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
+		return
+	}
 
 	if err := sess.EndCall(callID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1088,6 +1192,10 @@ func (a *API) handlePlayAudio(w http.ResponseWriter, r *http.Request) {
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -1112,9 +1220,18 @@ func (a *API) handlePlayAudio(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if body.WAVData != "" {
+		// Phase 0 Task 13: Limit decoded audio payload to 5MB
+		if len(body.WAVData) > 7*1024*1024 {
+			writeError(w, http.StatusRequestEntityTooLarge, "audio base64 payload exceeds limit")
+			return
+		}
 		wavBytes, err := base64.StdEncoding.DecodeString(body.WAVData)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid wav_base64 data")
+			return
+		}
+		if len(wavBytes) > 5*1024*1024 {
+			writeError(w, http.StatusRequestEntityTooLarge, "decoded audio payload exceeds 5MB limit")
 			return
 		}
 		samples, err := audio.DecodeWAVToPCM16k(strings.NewReader(string(wavBytes)))
@@ -1144,6 +1261,10 @@ func (a *API) handleWebRTCExchange(w http.ResponseWriter, r *http.Request) {
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -1177,6 +1298,10 @@ func (a *API) handleAudioStreamWS(w http.ResponseWriter, r *http.Request) {
 	sess, ok := a.sessions.GetSession(id)
 	if !ok {
 		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	// Phase 0: Added ownership check
+	if a.requireSessionOwnership(w, r, sess) {
 		return
 	}
 
@@ -1319,7 +1444,28 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleDeleteKey(w http.ResponseWriter, r *http.Request) {
+	isAdmin, _ := r.Context().Value("is_admin").(bool)
+	userID, _ := r.Context().Value("user_id").(string)
 	keyID := r.PathValue("keyId")
+
+	// Phase 0: Verify ownership before deletion
+	if !isAdmin {
+		if userID == "" {
+			writeError(w, http.StatusUnauthorized, "Authentication required")
+			return
+		}
+		// Check that this key belongs to the authenticated user
+		key, err := a.store.GetAPIKeyByID(r.Context(), keyID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "API key not found")
+			return
+		}
+		if key.UserID != userID {
+			writeError(w, http.StatusForbidden, "access denied to this API key")
+			return
+		}
+	}
+
 	if err := a.store.DeleteAPIKey(r.Context(), keyID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

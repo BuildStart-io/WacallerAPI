@@ -6,9 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"wacallerapi/internal/store"
+
+	"golang.org/x/time/rate"
 )
 
 type Middleware struct {
@@ -36,6 +39,18 @@ func (m *Middleware) CORS(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Phase 0 Task 13: Limit request payload size to maxBytes to prevent memory exhaustion attacks
+func (m *Middleware) BodySizeLimit(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func (m *Middleware) Logger(next http.Handler) http.Handler {
@@ -199,4 +214,108 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(status int) {
 	rw.status = status
 	rw.ResponseWriter.WriteHeader(status)
+}
+
+// Phase 0 Task 11: Rate limiting middleware
+
+// RateLimiterMap manages per-key rate limiters with automatic cleanup.
+type RateLimiterMap struct {
+	mu       sync.RWMutex
+	limiters map[string]*rateLimiterEntry
+}
+
+type rateLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+func newRateLimiterMap() *RateLimiterMap {
+	rl := &RateLimiterMap{
+		limiters: make(map[string]*rateLimiterEntry),
+	}
+	// Cleanup stale entries every 5 minutes
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			rl.cleanup()
+		}
+	}()
+	return rl
+}
+
+func (rl *RateLimiterMap) getLimiter(key string, rps rate.Limit, burst int) *rate.Limiter {
+	rl.mu.RLock()
+	entry, exists := rl.limiters[key]
+	rl.mu.RUnlock()
+	if exists {
+		entry.lastSeen = time.Now()
+		return entry.limiter
+	}
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	// Double-check after acquiring write lock
+	if entry, exists := rl.limiters[key]; exists {
+		entry.lastSeen = time.Now()
+		return entry.limiter
+	}
+	limiter := rate.NewLimiter(rps, burst)
+	rl.limiters[key] = &rateLimiterEntry{
+		limiter:  limiter,
+		lastSeen: time.Now(),
+	}
+	return limiter
+}
+
+func (rl *RateLimiterMap) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	threshold := time.Now().Add(-10 * time.Minute)
+	for key, entry := range rl.limiters {
+		if entry.lastSeen.Before(threshold) {
+			delete(rl.limiters, key)
+		}
+	}
+}
+
+var globalRateLimiters = newRateLimiterMap()
+
+// RateLimit creates a rate-limiting middleware that limits requests per IP.
+// rps is requests per second, burst is the maximum burst size.
+func (m *Middleware) RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := extractIP(r)
+			limiter := globalRateLimiters.getLimiter(ip, rate.Limit(rps), burst)
+			if !limiter.Allow() {
+				w.Header().Set("Retry-After", "60")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error":   "rate_limit_exceeded",
+					"message": "Too many requests. Please slow down.",
+				})
+				m.log.Warn("rate limit exceeded", "ip", ip, "path", r.URL.Path)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func extractIP(r *http.Request) string {
+	// Check X-Forwarded-For first (reverse proxy)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.SplitN(xff, ",", 2)
+		return strings.TrimSpace(parts[0])
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return xri
+	}
+	// Fall back to remote address
+	ip := r.RemoteAddr
+	if idx := strings.LastIndex(ip, ":"); idx != -1 {
+		ip = ip[:idx]
+	}
+	return ip
 }

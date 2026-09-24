@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -55,6 +57,35 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+
+	// Phase 0 Task 9: CLI bootstrap-admin command
+	if len(os.Args) > 1 && os.Args[1] == "bootstrap-admin" {
+		fs := flag.NewFlagSet("bootstrap-admin", flag.ExitOnError)
+		emailFlag := fs.String("email", "admin@wacaller.local", "Superadmin email address")
+		passFlag := fs.String("password", "", "Superadmin password (leave empty to auto-generate)")
+		_ = fs.Parse(os.Args[2:])
+
+		password := *passFlag
+		if password == "" {
+			passBytes := make([]byte, 12)
+			_, _ = rand.Read(passBytes)
+			password = fmt.Sprintf("Admin_%x!", passBytes)
+		}
+
+		admin, err := st.BootstrapAdmin(ctx, *emailFlag, password)
+		if err != nil {
+			fmt.Printf("❌ Bootstrap failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("\n✅ \x1b[1;32mSuperadmin Created Successfully!\x1b[0m\n")
+		fmt.Printf("   ├─ User ID  : %s\n", admin.ID)
+		fmt.Printf("   ├─ Email    : %s\n", admin.Email)
+		fmt.Printf("   ├─ Role     : %s\n", admin.Role)
+		fmt.Printf("   ├─ PAT      : %s\n", admin.PATToken)
+		fmt.Printf("   └─ Password : %s\n\n", password)
+		os.Exit(0)
+	}
 
 	waLogger := waLog.Noop
 	if cfg.Debug {

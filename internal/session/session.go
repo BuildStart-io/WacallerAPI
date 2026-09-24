@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"wacallerapi/internal/safenet"
 	"wacallerapi/internal/store"
 	"wacallerapi/internal/voip/call"
 	"wacallerapi/internal/voip/core"
@@ -440,23 +440,13 @@ func (s *Session) SendMediaMessage(ctx context.Context, req MediaMessageRequest)
 		return "", errors.New("session is not connected to WhatsApp")
 	}
 
-	// 1. Fetch media content from URL
-	httpResp, err := http.Get(req.URL)
+	// 1. Fetch media content from URL (SSRF-safe)
+	data, err := safenet.SafeGet(ctx, req.URL)
 	if err != nil {
-		return "", fmt.Errorf("failed to download media: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("media download returned status: %d", httpResp.StatusCode)
+		return "", fmt.Errorf("failed to download media (SSRF check failed or network error): %w", err)
 	}
 
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read media data: %w", err)
-	}
-
-	mimeType := httpResp.Header.Get("Content-Type")
+	mimeType := http.DetectContentType(data)
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
@@ -208,30 +209,18 @@ func (s *Store) migrate(ctx context.Context) error {
 	_, _ = s.db.ExecContext(ctx, "ALTER TABLE api_keys ADD COLUMN user_id TEXT;")
 	_, _ = s.db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'developer';")
 	_, _ = s.db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN trial_ends_at DATETIME;")
+	// Phase 0: Password version column (1 = SHA-256 legacy, 2 = bcrypt)
+	_, _ = s.db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN password_version INTEGER NOT NULL DEFAULT 1;")
 
-	// Seed default admin developer account if none exists
-	var userCount int
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&userCount)
-	if userCount == 0 {
-		defaultPAT := "wac_pat_demo_master_token"
-		now := time.Now().UTC()
-		trialEnd := now.Add(365 * 24 * time.Hour)
-		_, _ = s.db.ExecContext(ctx,
-			`INSERT INTO users (id, email, name, role, password_hash, pat_token, trial_ends_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			"usr_admin_yasiru", "yasirubandaraprivate@gmail.com", "Yasiru Bandara Private", "superadmin", hashKey("password123"), defaultPAT, trialEnd, now,
-		)
-		_ = s.CreateOrUpdateSubscription(ctx, &SubscriptionRecord{
-			ID:          "sub_admin_master",
-			UserID:      "usr_admin_yasiru",
-			Plan:        "business",
-			Status:      "active",
-			MaxSessions: 100,
-			AmountCents: 4900,
-			Currency:    "usd",
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		})
-	}
+	// Phase 0: Stripe event deduplication table
+	_, _ = s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS stripe_events (
+		event_id TEXT PRIMARY KEY,
+		event_type TEXT NOT NULL,
+		processed_at DATETIME NOT NULL
+	);`)
+
+	// Phase 0: Removed hardcoded superadmin credentials (security fix).
+	// Use CLI bootstrap command or manual admin creation instead.
 
 	return nil
 }
@@ -245,12 +234,16 @@ func (s *Store) CreateUser(ctx context.Context, name, email, rawPassword string)
 	}
 	pat := "wac_pat_" + hex.EncodeToString(rawBytes)
 	userID := "usr_" + hex.EncodeToString(rawBytes[:8])
-	pwdHash := hashKey(rawPassword)
+	// Phase 0: Use bcrypt instead of SHA-256
+	pwdHash, err := hashPassword(rawPassword)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash password: %w", err)
+	}
 	now := time.Now().UTC()
 	trialEnd := now.Add(7 * 24 * time.Hour) // 7-day trial
 
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (id, email, name, role, password_hash, pat_token, trial_ends_at, created_at) VALUES (?, ?, ?, 'developer', ?, ?, ?, ?)`,
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO users (id, email, name, role, password_hash, password_version, pat_token, trial_ends_at, created_at) VALUES (?, ?, ?, 'developer', ?, 2, ?, ?, ?)`,
 		userID, email, name, pwdHash, pat, trialEnd, now,
 	)
 	if err != nil {
@@ -282,16 +275,43 @@ func (s *Store) CreateUser(ctx context.Context, name, email, rawPassword string)
 }
 
 func (s *Store) AuthenticateUser(ctx context.Context, email, rawPassword string) (*User, error) {
-	pwdHash := hashKey(rawPassword)
+	// Phase 0: Fetch stored hash and password version for migration support
 	var u User
 	var trialEnd sql.NullTime
+	var storedHash string
+	var pwdVersion int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, name, role, pat_token, trial_ends_at, created_at FROM users WHERE email = ? AND password_hash = ?`,
-		email, pwdHash,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.PATToken, &trialEnd, &u.CreatedAt)
+		`SELECT id, email, name, role, password_hash, COALESCE(password_version, 1), pat_token, trial_ends_at, created_at FROM users WHERE email = ?`,
+		email,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.Role, &storedHash, &pwdVersion, &u.PATToken, &trialEnd, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
+
+	// Phase 0: Verify password based on version
+	var passwordValid bool
+	if pwdVersion == 2 {
+		// bcrypt
+		passwordValid = verifyPassword(storedHash, rawPassword)
+	} else {
+		// Legacy SHA-256 — verify and then rehash with bcrypt
+		legacyHash := hashKey(rawPassword)
+		passwordValid = storedHash == legacyHash
+		if passwordValid {
+			// Transparently upgrade to bcrypt
+			if newHash, err := hashPassword(rawPassword); err == nil {
+				_, _ = s.db.ExecContext(ctx,
+					`UPDATE users SET password_hash = ?, password_version = 2 WHERE id = ?`,
+					newHash, u.ID,
+				)
+			}
+		}
+	}
+
+	if !passwordValid {
+		return nil, fmt.Errorf("invalid credentials")
+	}
+
 	if trialEnd.Valid {
 		u.TrialEndsAt = trialEnd.Time
 	}
@@ -552,6 +572,27 @@ func (s *Store) ListAPIKeysByUser(ctx context.Context, userID string) ([]APIKey,
 func (s *Store) DeleteAPIKey(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM api_keys WHERE id = ?`, id)
 	return err
+}
+
+// Phase 0: GetAPIKeyByID retrieves an API key by ID for ownership verification.
+func (s *Store) GetAPIKeyByID(ctx context.Context, id string) (*APIKey, error) {
+	var k APIKey
+	var lastUsed sql.NullTime
+	var userID sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, user_id, name, created_at, last_used_at, enabled FROM api_keys WHERE id = ?`,
+		id,
+	).Scan(&k.ID, &userID, &k.Name, &k.CreatedAt, &lastUsed, &k.Enabled)
+	if err != nil {
+		return nil, err
+	}
+	if userID.Valid {
+		k.UserID = userID.String
+	}
+	if lastUsed.Valid {
+		k.LastUsedAt = &lastUsed.Time
+	}
+	return &k, nil
 }
 
 // ----------------- Sessions -----------------
@@ -1124,6 +1165,84 @@ func (s *Store) GetSubscriptionByStripeSessionID(ctx context.Context, sessionID 
 func hashKey(raw string) string {
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])
+}
+
+// Phase 0: bcrypt password hashing (replaces SHA-256 for passwords)
+func hashPassword(raw string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(raw), 12)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
+func verifyPassword(hash, raw string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(raw)) == nil
+}
+
+// Phase 0: Stripe event deduplication
+func (s *Store) IsStripeEventProcessed(ctx context.Context, eventID string) bool {
+	var count int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stripe_events WHERE event_id = ?`, eventID).Scan(&count)
+	return count > 0
+}
+
+func (s *Store) MarkStripeEventProcessed(ctx context.Context, eventID, eventType string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO stripe_events (event_id, event_type, processed_at) VALUES (?, ?, ?)`,
+		eventID, eventType, time.Now().UTC(),
+	)
+	return err
+}
+
+// Phase 0: Bootstrap admin creation (replaces hardcoded credentials)
+func (s *Store) BootstrapAdmin(ctx context.Context, email, rawPassword string) (*User, error) {
+	var userCount int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&userCount)
+	if userCount > 0 {
+		return nil, fmt.Errorf("cannot bootstrap admin: users already exist")
+	}
+
+	rawBytes := make([]byte, 20)
+	if _, err := rand.Read(rawBytes); err != nil {
+		return nil, err
+	}
+	pat := "wac_pat_" + hex.EncodeToString(rawBytes)
+	userID := "usr_" + hex.EncodeToString(rawBytes[:8])
+	pwdHash, err := hashPassword(rawPassword)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash password: %w", err)
+	}
+	now := time.Now().UTC()
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO users (id, email, name, role, password_hash, password_version, pat_token, created_at) VALUES (?, ?, ?, 'superadmin', ?, 2, ?, ?)`,
+		userID, email, "Admin", pwdHash, pat, now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("admin creation failed: %w", err)
+	}
+
+	_ = s.CreateOrUpdateSubscription(ctx, &SubscriptionRecord{
+		ID:          "sub_admin_" + hex.EncodeToString(rawBytes[:6]),
+		UserID:      userID,
+		Plan:        "business",
+		Status:      "active",
+		MaxSessions: 100,
+		AmountCents: 0,
+		Currency:    "usd",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
+
+	return &User{
+		ID:        userID,
+		Email:     email,
+		Name:      "Admin",
+		Role:      "superadmin",
+		PATToken:  pat,
+		CreatedAt: now,
+	}, nil
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {

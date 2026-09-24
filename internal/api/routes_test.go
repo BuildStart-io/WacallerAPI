@@ -99,17 +99,25 @@ func TestAPIKeyCreationAndProtection(t *testing.T) {
 	api, st, cleanup := setupTestAPI(t)
 	defer cleanup()
 
-	// 1. Initial state (no keys exist) -> open access works
+	// Phase 0: First register a user to get a PAT token for authenticated requests
+	user, err := st.CreateUser(context.Background(), "Test Dev", "dev@test.com", "securePassword1!")
+	if err != nil {
+		t.Fatalf("failed to create test user: %v", err)
+	}
+
+	// 1. Initial state — listing sessions with PAT should work
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+user.PATToken)
 	w := httptest.NewRecorder()
 	api.Routes().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 for open access, got %d", w.Code)
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// 2. Create an API Key
+	// 2. Create an API Key (now requires authentication)
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/keys", bytes.NewReader([]byte(`{"name":"Dev Key"}`)))
 	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Authorization", "Bearer "+user.PATToken)
 	wCreate := httptest.NewRecorder()
 	api.Routes().ServeHTTP(wCreate, createReq)
 	if wCreate.Code != http.StatusCreated {
@@ -131,7 +139,7 @@ func TestAPIKeyCreationAndProtection(t *testing.T) {
 		t.Fatal("expected non-empty key")
 	}
 
-	// 3. Action endpoints like /send-message require auth
+	// 3. Unauthenticated /send-message should be rejected
 	unauthReq := httptest.NewRequest(http.MethodPost, "/api/v1/send-message", bytes.NewReader([]byte(`{"to":"+94771234567","text":"Hi"}`)))
 	unauthReq.Header.Set("Content-Type", "application/json")
 	wUnauth := httptest.NewRecorder()
@@ -158,12 +166,19 @@ func TestAPIKeyCreationAndProtection(t *testing.T) {
 }
 
 func TestWasenderAPIStyleEndpoints(t *testing.T) {
-	api, _, cleanup := setupTestAPI(t)
+	api, st, cleanup := setupTestAPI(t)
 	defer cleanup()
 
-	// 1. Create a session via POST /api/sessions
+	// Phase 0: Register a user first (required for authenticated session creation)
+	user, err := st.CreateUser(context.Background(), "Test Dev", "wasender@test.com", "securePassword1!")
+	if err != nil {
+		t.Fatalf("failed to create test user: %v", err)
+	}
+
+	// 1. Create a session via POST /api/sessions (now requires auth)
 	createSessReq := httptest.NewRequest(http.MethodPost, "/api/sessions", bytes.NewReader([]byte(`{"name":"Main Number"}`)))
 	createSessReq.Header.Set("Content-Type", "application/json")
+	createSessReq.Header.Set("Authorization", "Bearer "+user.PATToken)
 	wSess := httptest.NewRecorder()
 	api.Routes().ServeHTTP(wSess, createSessReq)
 	if wSess.Code != http.StatusCreated {
@@ -220,5 +235,20 @@ func TestWasenderAPIStyleEndpoints(t *testing.T) {
 	// Authenticated and routed successfully to calling engine
 	if wCall.Code == http.StatusUnauthorized {
 		t.Fatal("expected call request to be authenticated with session API key")
+	}
+}
+
+// Phase 0: Test that unauthenticated requests to session endpoints are rejected
+func TestUnauthenticatedSessionAccessDenied(t *testing.T) {
+	api, _, cleanup := setupTestAPI(t)
+	defer cleanup()
+
+	// Try to create session without auth
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewReader([]byte(`{"name":"Hacked"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.Routes().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated session creation, got %d", w.Code)
 	}
 }
