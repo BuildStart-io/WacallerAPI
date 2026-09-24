@@ -21,6 +21,7 @@ import (
 	"wacallerapi/internal/api/middleware"
 	"wacallerapi/internal/audio"
 	"wacallerapi/internal/config"
+	"wacallerapi/internal/service"
 	"wacallerapi/internal/session"
 	"wacallerapi/internal/store"
 	"wacallerapi/internal/voip/media"
@@ -35,6 +36,7 @@ type API struct {
 	sessions   *session.SessionManager
 	dispatcher *webhook.Dispatcher
 	mw         *middleware.Middleware
+	services   *service.Services
 	log        *slog.Logger
 	startTime  time.Time
 }
@@ -50,6 +52,12 @@ func New(cfg *config.Config, st *store.Store, sm *session.SessionManager, disp *
 		log:        log,
 		startTime:  time.Now().UTC(),
 	}
+}
+
+// WithServices attaches the enterprise service layer to the API handler.
+func (a *API) WithServices(services *service.Services) *API {
+	a.services = services
+	return a
 }
 
 func (a *API) Routes() http.Handler {

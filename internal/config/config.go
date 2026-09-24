@@ -10,16 +10,19 @@ import (
 
 // Config represents all server configuration parameters.
 type Config struct {
-	Addr               string
-	DBPath             string
-	MasterAPIKey       string
-	GlobalWebhookURL   string
-	WebhookSecret      string
-	MaxCallsPerSession int
-	Debug              bool
-	StripeSecretKey    string
+	Addr                 string
+	DBPath               string // Legacy SQLite path (fallback / migration source)
+	PostgresDSN          string // PostgreSQL connection DSN
+	RedisURL             string // Redis connection URL
+	WhatsAppDBPath       string // SQLite path specifically for whatsmeow device store
+	MasterAPIKey         string
+	GlobalWebhookURL     string
+	WebhookSecret        string
+	MaxCallsPerSession   int
+	Debug                bool
+	StripeSecretKey      string
 	StripePublishableKey string
-	StripeWebhookSecret string
+	StripeWebhookSecret  string
 }
 
 func loadDotEnv() {
@@ -54,6 +57,9 @@ func Load() *Config {
 	cfg := &Config{
 		Addr:                 ":8080",
 		DBPath:               "wacaller.db",
+		PostgresDSN:          "",
+		RedisURL:             "redis://localhost:6379/0",
+		WhatsAppDBPath:       "wacaller_wa.db",
 		MasterAPIKey:         "",
 		GlobalWebhookURL:     "",
 		WebhookSecret:        "",
@@ -69,6 +75,22 @@ func Load() *Config {
 	}
 	if env := os.Getenv("WACALLER_DB"); env != "" {
 		cfg.DBPath = env
+	}
+	if env := os.Getenv("POSTGRES_DSN"); env != "" {
+		cfg.PostgresDSN = env
+	} else if env := os.Getenv("WACALLER_POSTGRES_DSN"); env != "" {
+		cfg.PostgresDSN = env
+	}
+	if env := os.Getenv("REDIS_URL"); env != "" {
+		cfg.RedisURL = env
+	} else if env := os.Getenv("WACALLER_REDIS_URL"); env != "" {
+		cfg.RedisURL = env
+	}
+	if env := os.Getenv("WACALLER_WA_DB"); env != "" {
+		cfg.WhatsAppDBPath = env
+	} else if cfg.DBPath != "" {
+		// If WhatsAppDBPath wasn't explicitly set, default to DBPath for smooth transition
+		cfg.WhatsAppDBPath = cfg.DBPath
 	}
 	if env := os.Getenv("WACALLER_API_KEY"); env != "" {
 		cfg.MasterAPIKey = env
@@ -98,7 +120,10 @@ func Load() *Config {
 	}
 
 	flag.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP/WebSocket listen address")
-	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path")
+	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path (legacy)")
+	flag.StringVar(&cfg.PostgresDSN, "postgres-dsn", cfg.PostgresDSN, "PostgreSQL connection DSN")
+	flag.StringVar(&cfg.RedisURL, "redis-url", cfg.RedisURL, "Redis connection URL")
+	flag.StringVar(&cfg.WhatsAppDBPath, "wa-db", cfg.WhatsAppDBPath, "SQLite path for whatsmeow device store")
 	flag.StringVar(&cfg.MasterAPIKey, "api-key", cfg.MasterAPIKey, "Master API Key (optional, enables API protection if set)")
 	flag.StringVar(&cfg.GlobalWebhookURL, "webhook-url", cfg.GlobalWebhookURL, "Global fallback webhook URL")
 	flag.StringVar(&cfg.WebhookSecret, "webhook-secret", cfg.WebhookSecret, "Secret for signing webhook HMAC payloads")

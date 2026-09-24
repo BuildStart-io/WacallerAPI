@@ -15,6 +15,9 @@ import (
 
 	"wacallerapi/internal/api"
 	"wacallerapi/internal/config"
+	"wacallerapi/internal/database"
+	"wacallerapi/internal/database/repository"
+	"wacallerapi/internal/service"
 	"wacallerapi/internal/session"
 	"wacallerapi/internal/store"
 	"wacallerapi/internal/web"
@@ -50,10 +53,40 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Info("initializing WacallerAPI storage", "db", cfg.DBPath)
-	st, err := store.Open(ctx, cfg.DBPath)
+	// Initialize PostgreSQL if DSN provided
+	var svcs *service.Services
+	if cfg.PostgresDSN != "" {
+		log.Info("connecting to PostgreSQL primary database...", "dsn_configured", true)
+		pgDB, err := database.OpenPostgres(ctx, database.DefaultConfig(cfg.PostgresDSN))
+		if err != nil {
+			log.Error("failed to connect to PostgreSQL database", "err", err)
+			os.Exit(1)
+		}
+		defer pgDB.Close()
+
+		log.Info("running PostgreSQL versioned migrations...")
+		if err := database.RunMigrations(cfg.PostgresDSN); err != nil {
+			log.Error("failed to execute database migrations", "err", err)
+			os.Exit(1)
+		}
+		log.Info("PostgreSQL migrations executed successfully")
+
+		repos := repository.NewRepositories(pgDB)
+		svcs = service.NewServices(repos)
+		log.Info("domain repositories and application services initialized")
+	} else {
+		log.Info("PostgreSQL DSN not configured — running with local SQLite storage only")
+	}
+
+	waDBPath := cfg.WhatsAppDBPath
+	if waDBPath == "" {
+		waDBPath = cfg.DBPath
+	}
+
+	log.Info("initializing whatsmeow device store storage", "db", waDBPath)
+	st, err := store.Open(ctx, waDBPath)
 	if err != nil {
-		log.Error("failed to open database", "err", err)
+		log.Error("failed to open device database", "err", err)
 		os.Exit(1)
 	}
 	defer st.Close()
@@ -107,6 +140,9 @@ func main() {
 	}
 
 	apiServer := api.New(cfg, st, sessionMgr, dispatcher, log)
+	if svcs != nil {
+		apiServer = apiServer.WithServices(svcs)
+	}
 
 	mainMux := http.NewServeMux()
 	mainMux.Handle("/api/", apiServer.Routes())

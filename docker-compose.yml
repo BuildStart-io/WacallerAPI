@@ -1,14 +1,55 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wacaller-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: wacaller
+      POSTGRES_USER: wacaller
+      POSTGRES_PASSWORD: wacaller_secure_password_change_me
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wacaller -d wacaller"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: wacaller-redis
+    restart: always
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   wacaller:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: wacaller-api
     restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8090:8090"
     volumes:
       - ./data:/app/data
+    environment:
+      - POSTGRES_DSN=postgres://wacaller:wacaller_secure_password_change_me@postgres:5432/wacaller?sslmode=disable
+      - REDIS_URL=redis://redis:6379/0
+      - WACALLER_WA_DB=/app/data/wacaller_wa.db
     env_file:
       - .env
     dns:
@@ -19,3 +60,7 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+volumes:
+  postgres_data:
+  redis_data:
