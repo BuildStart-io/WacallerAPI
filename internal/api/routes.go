@@ -603,7 +603,15 @@ func (a *API) handleSessionList(w http.ResponseWriter, r *http.Request) {
 
 	var sessions []session.SessionInfo
 	if isAdmin {
-		sessions = a.sessions.ListSessions()
+		queryUserID := r.URL.Query().Get("user_id")
+		if queryUserID == "" {
+			queryUserID = r.URL.Query().Get("userId")
+		}
+		if queryUserID != "" {
+			sessions = a.sessions.ListSessionsByUser(queryUserID)
+		} else {
+			sessions = a.sessions.ListSessions()
+		}
 	} else if userID != "" {
 		sessions = a.sessions.ListSessionsByUser(userID)
 	} else {
@@ -623,15 +631,24 @@ func (a *API) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name       string `json:"name"`
 		WebhookURL string `json:"webhook_url"`
+		UserID     string `json:"user_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	if !isAdmin && userID == "" {
-		writeError(w, http.StatusUnauthorized, "Authentication required. Please sign in or pass a valid Personal Access Token (PAT).")
-		return
+	// Admin / M2M requests can specify target user_id (org_uuid) in payload
+	if isAdmin && body.UserID != "" {
+		userID = body.UserID
 	}
 
-	// Enforce quota for non-admins
+	if !isAdmin && userID == "" {
+		keys, _ := a.store.ListAPIKeys(r.Context())
+		if a.cfg.MasterAPIKey != "" || len(keys) > 0 {
+			writeError(w, http.StatusUnauthorized, "Authentication required. Please sign in or pass a valid Personal Access Token (PAT).")
+			return
+		}
+	}
+
+	// Enforce quota for non-admins (bypassed for admin / M2M requests)
 	if !isAdmin && userID != "" {
 		sub, _ := a.store.GetSubscriptionByUserID(r.Context(), userID)
 		maxLines := 1
@@ -1299,8 +1316,11 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !isAdmin && userID == "" {
-		writeError(w, http.StatusUnauthorized, "Authentication required to generate custom API keys")
-		return
+		keys, _ := a.store.ListAPIKeys(r.Context())
+		if a.cfg.MasterAPIKey != "" || len(keys) > 0 {
+			writeError(w, http.StatusUnauthorized, "Authentication required to generate custom API keys")
+			return
+		}
 	}
 
 	key, err := a.store.CreateAPIKey(r.Context(), body.Name, userID)

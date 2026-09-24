@@ -97,8 +97,11 @@ func (d *Dispatcher) Dispatch(sessionID, sessionWebhookURL string, event EventTy
 		event:     event,
 		payload:   p,
 	}:
+		if len(d.workCh) > cap(d.workCh)*8/10 {
+			d.log.Warn("webhook work queue buffer approaching capacity", "event", event, "session_id", sessionID, "queue_len", len(d.workCh), "queue_cap", cap(d.workCh))
+		}
 	default:
-		d.log.Warn("webhook work queue full, dropping event", "event", event, "session_id", sessionID)
+		d.log.Warn("webhook work queue full, dropping event", "event", event, "session_id", sessionID, "queue_len", len(d.workCh), "queue_cap", cap(d.workCh))
 	}
 }
 

@@ -70,7 +70,11 @@ func Load() *Config {
 	if env := os.Getenv("WACALLER_DB"); env != "" {
 		cfg.DBPath = env
 	}
-	if env := os.Getenv("WACALLER_API_KEY"); env != "" {
+	if env := os.Getenv("WACALLER_MASTER_KEY"); env != "" {
+		cfg.MasterAPIKey = env
+	} else if env := os.Getenv("WACALLER_M2M_KEY"); env != "" {
+		cfg.MasterAPIKey = env
+	} else if env := os.Getenv("WACALLER_API_KEY"); env != "" {
 		cfg.MasterAPIKey = env
 	}
 	if env := os.Getenv("WACALLER_WEBHOOK_URL"); env != "" {

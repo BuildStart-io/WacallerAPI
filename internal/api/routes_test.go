@@ -222,3 +222,77 @@ func TestWasenderAPIStyleEndpoints(t *testing.T) {
 		t.Fatal("expected call request to be authenticated with session API key")
 	}
 }
+
+func TestM2MGatewayIntegration(t *testing.T) {
+	ctx := context.Background()
+	dbFile := "test_m2m.db"
+	_ = os.Remove(dbFile)
+	defer os.Remove(dbFile)
+
+	st, err := store.Open(ctx, dbFile)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	container := sqlstore.NewWithDB(st.DB(), "sqlite3", waLog.Noop)
+	if err := container.Upgrade(ctx); err != nil {
+		t.Fatalf("failed to upgrade sqlstore: %v", err)
+	}
+
+	masterKey := "test_m2m_master_key_12345"
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	cfg := &config.Config{Addr: ":8080", MasterAPIKey: masterKey}
+	disp := webhook.NewDispatcher(st, "", "test_secret", log)
+	sm := session.NewSessionManager(ctx, container, st, disp, log, 4)
+
+	api := New(cfg, st, sm, disp, log)
+
+	// 1. Unauthenticated request with master key set should fail
+	unauthReq := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewReader([]byte(`{"name":"M2M Session"}`)))
+	unauthReq.Header.Set("Content-Type", "application/json")
+	wUnauth := httptest.NewRecorder()
+	api.Routes().ServeHTTP(wUnauth, unauthReq)
+	if wUnauth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated M2M request, got %d", wUnauth.Code)
+	}
+
+	// 2. Authenticated M2M request creating session with custom user_id (org_uuid)
+	m2mBody := `{"name":"Lovable Org Line","webhook_url":"https://lovable.app/webhook","user_id":"org_uuid_999"}`
+	m2mReq := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewReader([]byte(m2mBody)))
+	m2mReq.Header.Set("Content-Type", "application/json")
+	m2mReq.Header.Set("Authorization", "Bearer "+masterKey)
+	wM2M := httptest.NewRecorder()
+	api.Routes().ServeHTTP(wM2M, m2mReq)
+	if wM2M.Code != http.StatusCreated {
+		t.Fatalf("expected 201 created for M2M session creation, got %d: %s", wM2M.Code, wM2M.Body.String())
+	}
+
+	var sessResp struct {
+		Success   bool   `json:"success"`
+		SessionId string `json:"sessionId"`
+	}
+	if err := json.NewDecoder(wM2M.Body).Decode(&sessResp); err != nil || !sessResp.Success {
+		t.Fatalf("failed to decode M2M session response: %v", err)
+	}
+
+	// 3. List sessions filtered by user_id parameter
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?user_id=org_uuid_999", nil)
+	listReq.Header.Set("X-Api-Key", masterKey)
+	wList := httptest.NewRecorder()
+	api.Routes().ServeHTTP(wList, listReq)
+	if wList.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for M2M filtered session list, got %d", wList.Code)
+	}
+
+	var listResp struct {
+		Success  bool                  `json:"success"`
+		Sessions []session.SessionInfo `json:"sessions"`
+	}
+	if err := json.NewDecoder(wList.Body).Decode(&listResp); err != nil {
+		t.Fatalf("failed to decode session list: %v", err)
+	}
+	if len(listResp.Sessions) != 1 {
+		t.Fatalf("expected 1 session matching user_id org_uuid_999, got %d", len(listResp.Sessions))
+	}
+}

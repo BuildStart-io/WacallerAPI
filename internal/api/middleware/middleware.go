@@ -97,9 +97,10 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// 3. Check if key is master key
+		// 3. Check if key is master key / M2M key
 		if m.masterAPIKey != "" && key == m.masterAPIKey {
 			ctx := context.WithValue(r.Context(), "is_admin", true)
+			ctx = context.WithValue(ctx, "is_m2m", true)
 			ctx = context.WithValue(ctx, "role", "superadmin")
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -173,6 +174,7 @@ func (m *Middleware) RequireOptionalAuth(next http.Handler) http.Handler {
 				r = r.WithContext(ctx)
 			} else if m.masterAPIKey != "" && key == m.masterAPIKey {
 				ctx := context.WithValue(r.Context(), "is_admin", true)
+				ctx = context.WithValue(ctx, "is_m2m", true)
 				ctx = context.WithValue(ctx, "role", "superadmin")
 				r = r.WithContext(ctx)
 			}
