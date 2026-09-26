@@ -74,6 +74,10 @@ func NewDispatcher(st *store.Store, defaultURL, secret string, log *slog.Logger)
 	return d
 }
 
+func (d *Dispatcher) SigningSecret() string {
+	return d.signingSecret
+}
+
 func (d *Dispatcher) Dispatch(sessionID, sessionWebhookURL string, event EventType, data any) {
 	targetURL := sessionWebhookURL
 	if targetURL == "" {

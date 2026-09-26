@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"wacallerapi/internal/agent"
 	"wacallerapi/internal/audio"
 	"wacallerapi/internal/voip/call"
 
@@ -25,13 +26,15 @@ type CallContext struct {
 	DurationSeconds int
 	EndReason       string
 
-	cm     *call.CallManager
-	bridge *Bridge
-	log    *slog.Logger
+	cm           *call.CallManager
+	bridge       *Bridge
+	agentSession *agent.AgentSession
+	log          *slog.Logger
 
 	mu         sync.RWMutex
 	audioSubs  map[string]chan []float32
 	playCancel context.CancelFunc
+	playbackID uint64
 }
 
 func newCallContext(callID, sessionID, direction string, peer types.JID, peerNum string, cm *call.CallManager, log *slog.Logger) *CallContext {
@@ -136,11 +139,20 @@ func (c *CallContext) PlayAudioSamples(parentCtx context.Context, samples []floa
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	c.mu.Lock()
+	c.playbackID++
+	currentID := c.playbackID
 	c.playCancel = cancel
 	c.mu.Unlock()
 
 	go func() {
-		defer cancel()
+		defer func() {
+			c.mu.Lock()
+			if c.playbackID == currentID {
+				c.playCancel = nil
+			}
+			c.mu.Unlock()
+			cancel()
+		}()
 		frameSize := 960 // 60ms at 16 kHz
 		ticker := time.NewTicker(60 * time.Millisecond)
 		defer ticker.Stop()
@@ -172,7 +184,38 @@ func (c *CallContext) StopAudioPlayback() {
 	}
 }
 
+func (c *CallContext) IsPlaying() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.playCancel != nil
+}
+
+func (c *CallContext) StartVoiceAgent(secret string) {
+	c.mu.Lock()
+	if c.agentSession != nil {
+		c.mu.Unlock()
+		return
+	}
+	ag := agent.NewAgentSession(c.SessionID, c.CallID, secret, c, c.log)
+	c.agentSession = ag
+	c.mu.Unlock()
+
+	ag.Start(context.Background())
+}
+
+func (c *CallContext) StopVoiceAgent() {
+	c.mu.Lock()
+	ag := c.agentSession
+	c.agentSession = nil
+	c.mu.Unlock()
+
+	if ag != nil {
+		ag.Stop()
+	}
+}
+
 func (c *CallContext) Close() {
+	c.StopVoiceAgent()
 	c.StopAudioPlayback()
 
 	c.mu.Lock()
@@ -188,3 +231,4 @@ func (c *CallContext) Close() {
 		c.bridge = nil
 	}
 }
+

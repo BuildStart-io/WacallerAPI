@@ -709,7 +709,13 @@ func (s *Session) handleCallStateChange(callCtx *CallContext, c *call.CallInfo) 
 				"peer_number": callCtx.PeerNumber,
 				"direction":   callCtx.Direction,
 			})
+			secret := ""
+			if s.dispatcher != nil {
+				secret = s.dispatcher.SigningSecret()
+			}
+			callCtx.StartVoiceAgent(secret)
 		} else if newStatus == CallStatusEnded {
+			callCtx.StopVoiceAgent()
 			s.dispatcher.Dispatch(s.id, s.webhookURL, webhook.EventCallEnded, map[string]any{
 				"call_id":          callCtx.CallID,
 				"peer_number":      callCtx.PeerNumber,
