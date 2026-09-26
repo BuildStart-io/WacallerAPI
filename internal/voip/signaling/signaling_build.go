@@ -135,30 +135,30 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 }
 
 func extractEncFromParticipant(nodes []waBinary.Node, targetJID types.JID) *waBinary.Node {
-	targetStr := targetJID.String()
-
-	// Pass 1: exact match for companion devices (Device != 0)
+	// Pass 1: match exact active device JID or companion phone device (Device != 0)
 	for _, n := range nodes {
 		n := n
 		if jid, ok := getJIDFromParticipantNode(n); ok {
-			if parsed, err := types.ParseJID(jid); err == nil && parsed.Device != 0 {
-				if parsed.User == targetJID.User && parsed.Server == targetJID.Server {
-					if targetJID.Device == 0 || parsed.Device == targetJID.Device {
-						if enc := getEncNode(n); enc != nil {
-							return enc
-						}
+			if jid.User == targetJID.User && jid.Server == targetJID.Server {
+				if targetJID.Device != 0 && jid.Device == targetJID.Device {
+					if enc := getEncNode(n); enc != nil {
+						return enc
+					}
+				}
+				if targetJID.Device == 0 && jid.Device != 0 {
+					if enc := getEncNode(n); enc != nil {
+						return enc
 					}
 				}
 			}
 		}
 	}
 
-	// Pass 2: fallback match for device 0 or any matching user identity
-	targetBase := wanode.CleanJID(targetStr)
+	// Pass 2: match base user identity (Device == 0)
 	for _, n := range nodes {
 		n := n
 		if jid, ok := getJIDFromParticipantNode(n); ok {
-			if wanode.CleanJID(jid) == targetBase {
+			if jid.User == targetJID.User && jid.Server == targetJID.Server {
 				if enc := getEncNode(n); enc != nil {
 					return enc
 				}
@@ -175,16 +175,26 @@ func extractEncFromParticipant(nodes []waBinary.Node, targetJID types.JID) *waBi
 	return nil
 }
 
-func getJIDFromParticipantNode(n waBinary.Node) (string, bool) {
-	if jid, ok := n.Attrs["jid"].(string); ok {
+func getJIDFromParticipantNode(n waBinary.Node) (types.JID, bool) {
+	if jid, ok := n.Attrs["jid"].(types.JID); ok {
 		return jid, true
 	}
-	for _, c := range wanode.NodeChildren(&n) {
-		if jid, ok := c.Attrs["jid"].(string); ok {
-			return jid, true
+	if str, ok := n.Attrs["jid"].(string); ok {
+		if parsed, err := types.ParseJID(str); err == nil {
+			return parsed, true
 		}
 	}
-	return "", false
+	for _, c := range wanode.NodeChildren(&n) {
+		if jid, ok := c.Attrs["jid"].(types.JID); ok {
+			return jid, true
+		}
+		if str, ok := c.Attrs["jid"].(string); ok {
+			if parsed, err := types.ParseJID(str); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return types.EmptyJID, false
 }
 
 func getEncNode(n waBinary.Node) *waBinary.Node {

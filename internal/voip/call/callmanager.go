@@ -218,22 +218,7 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		m.relay.ResendSubscriptions()
 	}
 
-	// Active state promotion: promoted immediately or after short 1.5s delay if peer ACK / RTP packet is slightly delayed
-	go func() {
-		time.Sleep(1500 * time.Millisecond)
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if m.currentCall != nil && m.currentCall.CallID == callID {
-			if m.currentCall.StateData.State == core.CallStateConnecting || m.currentCall.StateData.State == core.CallStateIncomingRinging {
-				if err := m.currentCall.ApplyTransition(Transition{Type: TransitionMediaConnected}); err == nil {
-					m.emitState()
-					m.log.Info("call ACTIVE (accept confirmed)", "call_id", callID, "audio", m.codec != nil)
-				}
-			}
-		}
-	}()
-
-	m.log.Info("call accepted", "call_id", callID)
+	m.log.Info("call accepted (waiting for caller answer/media confirmation)", "call_id", callID)
 	return nil
 }
 
