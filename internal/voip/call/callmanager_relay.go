@@ -24,18 +24,13 @@ var _ RelayTransport = (*transport.SctpRelayManager)(nil)
 func (m *CallManager) onRelayConnected() {
 	m.mu.Lock()
 	call := m.currentCall
-	// Guard: if the call is already ended, ignore this late-firing OnOpen.
 	if call == nil || call.IsEnded() {
 		m.mu.Unlock()
 		return
 	}
-	// Do NOT start audio yet if the call hasn't been accepted — the relay can connect
-	// during the ring delay (before AcceptCall is called). Sending RTP before the accept
-	// stanza reaches WhatsApp means the peer can't decrypt our packets and drops the call
-	// after ~5 s. AcceptCall itself calls startSilenceKeepaliveLocked when it runs.
 	state := call.StateData.State
 	if state == core.CallStateIncomingRinging || state == core.CallStateInitiating {
-		m.log.Info("relay connected before accept — deferring audio until AcceptCall", "call_id", call.CallID)
+		m.log.Info("relay transport socket connected before accept — deferring active state until AcceptCall", "call_id", call.CallID)
 		m.mu.Unlock()
 		return
 	}

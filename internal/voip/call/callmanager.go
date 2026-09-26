@@ -43,6 +43,7 @@ type CallManager struct {
 	lastCaptureAt  time.Time
 	keepaliveStop  chan struct{}
 	outPacketCount int
+	inPacketCount  int
 
 	OnStateChange func(*CallInfo)
 	OnIncoming    func(*CallInfo)

@@ -179,13 +179,13 @@ func (m *CallManager) handlePreacceptAck(ctx context.Context, callID string, ack
 }
 
 func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node, peerJid types.JID) {
-
 	m.mu.Lock()
 	call := m.currentCall
 	m.mu.Unlock()
 	if call == nil {
 		return
 	}
+	m.log.Info("CALLER DEVICE ANSWER ACK RECEIVED", "call_id", call.CallID, "from", peerJid.String())
 	info := signaling.ExtractNodeInfo(node)
 	if info == nil {
 		return
@@ -204,6 +204,10 @@ func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node,
 
 	m.mu.Lock()
 	_ = call.ApplyTransition(Transition{Type: TransitionRemoteAccepted})
+	if m.relay.HasConnection() && (call.StateData.State == core.CallStateConnecting || call.StateData.State == core.CallStateIncomingRinging) {
+		_ = call.ApplyTransition(Transition{Type: TransitionMediaConnected})
+		m.log.Info("call ACTIVE (caller answer ACK verified)", "call_id", call.CallID)
+	}
 	m.emitState()
 	m.acceptedByJid = peerJid.String()
 	if m.peerSsrcs == nil || !m.actualPeerSet {

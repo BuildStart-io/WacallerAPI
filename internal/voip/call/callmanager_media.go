@@ -162,6 +162,26 @@ func (m *CallManager) onRelayData(data []byte) {
 		return
 	}
 	pcm = media.NormalizeFrame(pcm, codec.FrameSize())
+
+	m.mu.Lock()
+	m.inPacketCount++
+	inCount := m.inPacketCount
+	call := m.currentCall
+	if inCount == 1 && call != nil {
+		m.log.Info("FIRST INCOMING PEER AUDIO PACKET RECEIVED FROM CALLER",
+			"call_id", call.CallID,
+			"ssrc", ssrc,
+			"payload_len", len(pkt.Payload),
+		)
+		if call.StateData.State == core.CallStateConnecting || call.StateData.State == core.CallStateIncomingRinging {
+			if err := call.ApplyTransition(Transition{Type: TransitionMediaConnected}); err == nil {
+				m.emitState()
+				m.log.Info("call ACTIVE (peer media verified)", "call_id", call.CallID)
+			}
+		}
+	}
+	m.mu.Unlock()
+
 	if m.OnPeerAudio != nil {
 		m.OnPeerAudio(pcm)
 	}
