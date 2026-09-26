@@ -137,53 +137,64 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 func extractEncFromParticipant(nodes []waBinary.Node, targetJID types.JID) *waBinary.Node {
 	targetStr := targetJID.String()
 
-	// Pass 1: check parent <to jid="..."> or direct <enc jid="..."> for exact target JID
+	// Pass 1: exact match for companion devices (Device != 0)
 	for _, n := range nodes {
 		n := n
-		if n.Tag == "to" {
-			if jid, ok := n.Attrs["jid"].(string); ok && jid == targetStr {
-				for _, c := range wanode.NodeChildren(&n) {
-					c := c
-					if c.Tag == "enc" {
-						return &c
+		if jid, ok := getJIDFromParticipantNode(n); ok {
+			if parsed, err := types.ParseJID(jid); err == nil && parsed.Device != 0 {
+				if parsed.User == targetJID.User && parsed.Server == targetJID.Server {
+					if targetJID.Device == 0 || parsed.Device == targetJID.Device {
+						if enc := getEncNode(n); enc != nil {
+							return enc
+						}
 					}
 				}
 			}
 		}
-		if n.Tag == "enc" {
-			if jid, ok := n.Attrs["jid"].(string); ok && jid == targetStr {
-				return &n
-			}
-		}
 	}
 
-	// Pass 2: match base user identity (ignoring device ID suffix) if exact device JID wasn't matched
+	// Pass 2: fallback match for device 0 or any matching user identity
 	targetBase := wanode.CleanJID(targetStr)
 	for _, n := range nodes {
 		n := n
-		if n.Tag == "to" {
-			if jid, ok := n.Attrs["jid"].(string); ok && wanode.CleanJID(jid) == targetBase {
-				for _, c := range wanode.NodeChildren(&n) {
-					c := c
-					if c.Tag == "enc" {
-						return &c
-					}
+		if jid, ok := getJIDFromParticipantNode(n); ok {
+			if wanode.CleanJID(jid) == targetBase {
+				if enc := getEncNode(n); enc != nil {
+					return enc
 				}
 			}
 		}
 	}
 
-	// Fallback pass: return first enc node found
+	// Pass 3: return first enc node found
 	for _, n := range nodes {
-		n := n
-		if n.Tag == "enc" {
-			return &n
+		if enc := getEncNode(n); enc != nil {
+			return enc
 		}
-		for _, c := range wanode.NodeChildren(&n) {
-			c := c
-			if c.Tag == "enc" {
-				return &c
-			}
+	}
+	return nil
+}
+
+func getJIDFromParticipantNode(n waBinary.Node) (string, bool) {
+	if jid, ok := n.Attrs["jid"].(string); ok {
+		return jid, true
+	}
+	for _, c := range wanode.NodeChildren(&n) {
+		if jid, ok := c.Attrs["jid"].(string); ok {
+			return jid, true
+		}
+	}
+	return "", false
+}
+
+func getEncNode(n waBinary.Node) *waBinary.Node {
+	if n.Tag == "enc" {
+		return &n
+	}
+	for _, c := range wanode.NodeChildren(&n) {
+		c := c
+		if c.Tag == "enc" {
+			return &c
 		}
 	}
 	return nil
