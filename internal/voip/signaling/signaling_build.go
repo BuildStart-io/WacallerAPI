@@ -120,7 +120,7 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 
 	targetTo := target
 	if targetTo.IsEmpty() {
-		targetTo = wanode.MustJID(wanode.CleanJID(peerJid.String()))
+		targetTo = peerJid
 	}
 	return waBinary.Node{
 		Tag:   "call",
@@ -164,10 +164,9 @@ func BuildRejectStanza(peerJid types.JID, callID string, callCreator types.JID) 
 }
 
 func BuildPreacceptStanza(peerJid types.JID, callID string, callCreator types.JID) waBinary.Node {
-	cleanPeer := wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": peerJid, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag:   "preaccept",
 			Attrs: waBinary.Attrs{"call-id": callID, "call-creator": callCreator},
@@ -241,10 +240,9 @@ func BuildTransportStanza(peerJid types.JID, callID string, callCreator types.JI
 }
 
 func BuildTransportReplyStanza(peerJid types.JID, callID string, callCreator types.JID) waBinary.Node {
-	cleanPeer := wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": peerJid, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag: "transport",
 			Attrs: waBinary.Attrs{
@@ -258,10 +256,9 @@ func BuildTransportReplyStanza(peerJid types.JID, callID string, callCreator typ
 }
 
 func BuildMuteV2Stanza(peerDeviceJid types.JID, callID string, callCreator types.JID, muteState int) waBinary.Node {
-	cleanPeer := wanode.MustJID(wanode.CleanJID(peerDeviceJid.String()))
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": peerDeviceJid, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag: "mute_v2",
 			Attrs: waBinary.Attrs{
@@ -284,10 +281,9 @@ func BuildAcceptReceiptStanza(peerDeviceJid types.JID, acceptMsgID, callID strin
 }
 
 func callWrap(to types.JID, inner waBinary.Node) waBinary.Node {
-	cleanTo := wanode.MustJID(wanode.CleanJID(to.String()))
 	return waBinary.Node{
 		Tag:     "call",
-		Attrs:   waBinary.Attrs{"to": cleanTo, "id": GenerateCallStanzaID()},
+		Attrs:   waBinary.Attrs{"to": to, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{inner},
 	}
 }

@@ -165,15 +165,17 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 			m.log.Error("build accept failed", "err", err)
 		} else {
 			m.log.Info("accept raw node", "xml", acceptNode.String())
-			if err := m.sock.SendNode(ctx, acceptNode); err != nil {
-				m.log.Error("accept send error", "err", err)
+			ackResp, err := m.sock.Query(ctx, acceptNode)
+			if err != nil {
+				m.log.Warn("accept query error", "err", err)
+			} else if ackResp != nil {
+				m.log.Info("accept ack received from WhatsApp server", "xml", ackResp.String())
 			}
 		}
 
-		cleanPeer := wanode.MustJID(wanode.CleanJID(peer.String()))
 		transport := waBinary.Node{
 			Tag:   "call",
-			Attrs: waBinary.Attrs{"to": cleanPeer, "id": signaling.GenerateCallStanzaID()},
+			Attrs: waBinary.Attrs{"to": peer, "id": signaling.GenerateCallStanzaID()},
 			Content: []waBinary.Node{{
 				Tag: "transport",
 				Attrs: waBinary.Attrs{
@@ -184,7 +186,7 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 			}},
 		}
 		_ = m.sock.SendNode(ctx, transport)
-		_ = m.sock.SendNode(ctx, signaling.BuildMuteV2Stanza(cleanPeer, callID, creator, 0))
+		_ = m.sock.SendNode(ctx, signaling.BuildMuteV2Stanza(peer, callID, creator, 0))
 
 		if relayData != nil && len(relayData.Endpoints) > 0 {
 			var entries []signaling.RelayLatencyEntry
@@ -199,7 +201,7 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 					AddressBytes: ep.AddressBytes,
 				})
 			}
-			_ = m.sock.SendNode(ctx, signaling.BuildRelayLatencyStanza(cleanPeer, callID, creator, entries, nil))
+			_ = m.sock.SendNode(ctx, signaling.BuildRelayLatencyStanza(peer, callID, creator, entries, nil))
 		}
 	}
 
