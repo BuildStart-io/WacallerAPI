@@ -103,6 +103,7 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		{Tag: "net", Attrs: waBinary.Attrs{"medium": "2"}},
 		{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
 		{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityOffer},
+		{Tag: "destination", Content: nodes},
 		*encNode,
 	}
 	if includeDeviceIdentity {
@@ -128,20 +129,35 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 func extractEncFromParticipant(nodes []waBinary.Node, targetJID types.JID) *waBinary.Node {
 	targetStr := targetJID.String()
 
+	// Pass 1: check parent <to jid="..."> or direct <enc jid="..."> for exact target JID
 	for _, n := range nodes {
 		n := n
-		if n.Tag == "enc" {
-			if jid, ok := n.Attrs["jid"].(string); ok {
-				if jid == targetStr {
-					return &n
+		if n.Tag == "to" {
+			if jid, ok := n.Attrs["jid"].(string); ok && jid == targetStr {
+				for _, c := range wanode.NodeChildren(&n) {
+					c := c
+					if c.Tag == "enc" {
+						return &c
+					}
 				}
 			}
 		}
-		for _, c := range wanode.NodeChildren(&n) {
-			c := c
-			if c.Tag == "enc" {
-				if jid, ok := c.Attrs["jid"].(string); ok {
-					if jid == targetStr {
+		if n.Tag == "enc" {
+			if jid, ok := n.Attrs["jid"].(string); ok && jid == targetStr {
+				return &n
+			}
+		}
+	}
+
+	// Pass 2: match base user identity (ignoring device ID suffix) if exact device JID wasn't matched
+	targetBase := wanode.CleanJID(targetStr)
+	for _, n := range nodes {
+		n := n
+		if n.Tag == "to" {
+			if jid, ok := n.Attrs["jid"].(string); ok && wanode.CleanJID(jid) == targetBase {
+				for _, c := range wanode.NodeChildren(&n) {
+					c := c
+					if c.Tag == "enc" {
 						return &c
 					}
 				}
