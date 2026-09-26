@@ -165,12 +165,9 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		if err != nil {
 			m.log.Error("build accept failed", "err", err)
 		} else {
-			m.log.Info("accept raw node", "xml", acceptNode.String())
-			ackResp, err := m.sock.Query(ctx, acceptNode)
-			if err != nil {
-				m.log.Warn("accept query error", "err", err)
-			} else if ackResp != nil {
-				m.log.Info("accept ack received from WhatsApp server", "xml", ackResp.String())
+			m.log.Info("accept raw node", "xml", acceptNode.String(), "to", peer.String())
+			if err := m.sock.SendNode(ctx, acceptNode); err != nil {
+				m.log.Error("accept send error", "err", err)
 			}
 		}
 
