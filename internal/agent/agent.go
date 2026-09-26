@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,13 +158,31 @@ func (a *AgentSession) playResponseAudio(ctx context.Context, agentResp *AgentRe
 		return
 	}
 
-	audioData, err := base64.StdEncoding.DecodeString(agentResp.AudioBase64)
+	rawStr := agentResp.AudioBase64
+	if idx := strings.Index(rawStr, ","); idx != -1 && strings.Contains(rawStr[:idx], "base64") {
+		rawStr = rawStr[idx+1:]
+	}
+	rawStr = strings.TrimSpace(rawStr)
+
+	audioData, err := base64.StdEncoding.DecodeString(rawStr)
 	if err != nil {
 		a.log.Error("failed to decode audio_base64 string", "err", err)
 		return
 	}
 
 	samples, err := audio.DecodeWAVToPCM16k(bytes.NewReader(audioData))
+	if err != nil {
+		// Fallback: if data is raw 16-bit 16kHz PCM (without WAV header), convert directly
+		if len(audioData) >= 320 && len(audioData)%2 == 0 {
+			pcmSamples := make([]float32, len(audioData)/2)
+			for i := 0; i+2 <= len(audioData); i += 2 {
+				val := int16(uint16(audioData[i]) | uint16(audioData[i+1])<<8)
+				pcmSamples[i/2] = float32(val) / 32768.0
+			}
+			samples = pcmSamples
+			err = nil
+		}
+	}
 	if err != nil {
 		a.log.Error("failed to decode audio WAV data", "err", err)
 		return

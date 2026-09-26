@@ -207,20 +207,32 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		m.setupIncomingMedia(call, relayData)
 	}
 
-	if m.relay.HasConnection() {
-		m.mu.Lock()
-		if err := call.ApplyTransition(Transition{Type: TransitionMediaConnected}); err == nil {
-			m.emitState()
-			m.startSilenceKeepaliveLocked()
-			m.log.Info("call ACTIVE (media path established)", "call_id", callID, "audio", m.codec != nil)
-		}
-		m.mu.Unlock()
-		m.relay.ResendSubscriptions()
-	} else if relayData != nil {
+	if relayData != nil && !m.relay.HasConnection() {
 		m.connectRelays(relayData.Endpoints)
-	} else {
-		m.log.Warn("call accepted but no relay endpoints yet; media path waits for a transport message", "call_id", callID)
 	}
+
+	m.mu.Lock()
+	m.startSilenceKeepaliveLocked()
+	m.mu.Unlock()
+	if m.relay.HasConnection() {
+		m.relay.ResendSubscriptions()
+	}
+
+	// Active state promotion: promoted immediately or after short 1.5s delay if peer ACK / RTP packet is slightly delayed
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.currentCall != nil && m.currentCall.CallID == callID {
+			if m.currentCall.StateData.State == core.CallStateConnecting || m.currentCall.StateData.State == core.CallStateIncomingRinging {
+				if err := m.currentCall.ApplyTransition(Transition{Type: TransitionMediaConnected}); err == nil {
+					m.emitState()
+					m.log.Info("call ACTIVE (accept confirmed)", "call_id", callID, "audio", m.codec != nil)
+				}
+			}
+		}
+	}()
+
 	m.log.Info("call accepted", "call_id", callID)
 	return nil
 }

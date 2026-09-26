@@ -81,14 +81,22 @@ func ensureTargetPeer(peerJid, callCreator types.JID) types.JID {
 }
 
 func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid, callCreator types.JID, isVideo bool) (waBinary.Node, error) {
-	targetDevices := []types.JID{peerJid}
-	if !callCreator.IsEmpty() && callCreator != peerJid {
-		targetDevices = append(targetDevices, callCreator)
+	lookupJIDs := []types.JID{peerJid.ToNonAD()}
+	if !callCreator.IsEmpty() && callCreator.ToNonAD() != peerJid.ToNonAD() {
+		lookupJIDs = append(lookupJIDs, callCreator.ToNonAD())
 	}
 
-	_ = sock.AssertSessions(ctx, targetDevices, false)
+	rawDevices, err := sock.GetUSyncDevices(ctx, lookupJIDs)
+	if err != nil || len(rawDevices) == 0 {
+		rawDevices = []types.JID{peerJid}
+		if !callCreator.IsEmpty() && callCreator != peerJid {
+			rawDevices = append(rawDevices, callCreator)
+		}
+	}
 
-	nodes, includeDeviceIdentity, err := sock.CreateParticipantNodes(ctx, targetDevices, callKey, waBinary.Attrs{"count": "0"})
+	_ = sock.AssertSessions(ctx, rawDevices, false)
+
+	nodes, includeDeviceIdentity, err := sock.CreateParticipantNodes(ctx, rawDevices, callKey, waBinary.Attrs{"count": "0"})
 	if err != nil || len(nodes) == 0 {
 		return waBinary.Node{}, fmt.Errorf("encrypt accept failed: %w", err)
 	}
@@ -117,7 +125,7 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": peerJid, "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": peerJid.ToNonAD(), "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag:     "accept",
 			Attrs:   waBinary.Attrs{"call-id": callID, "call-creator": callCreator},
