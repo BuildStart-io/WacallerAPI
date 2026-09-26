@@ -111,6 +111,11 @@ func (s *Session) Info() SessionInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	status := s.status
+	if s.client != nil && s.client.IsConnected() && status != StatusLoggedOut {
+		status = StatusConnected
+	}
+
 	jid := s.getJID()
 	var phone string
 	if jid != "" {
@@ -123,7 +128,7 @@ func (s *Session) Info() SessionInfo {
 		UserID:     s.userID,
 		JID:        jid,
 		Phone:      phone,
-		Status:     s.status,
+		Status:     status,
 		QR:         s.currentQR,
 		WebhookURL: s.webhookURL,
 		APIKey:     s.apiKey,
@@ -832,6 +837,11 @@ func (s *Session) handleIncomingCallOffer(ctx context.Context, evt *events.CallO
 		StartedAt:       callCtx.StartedAt,
 	})
 
+	// Pass incoming call offer to CallManager so currentCall is populated and receipt/preaccept stanzas are handled
+	if callCtx.cm != nil {
+		callCtx.cm.HandleCallOffer(ctx, node, evt.From)
+	}
+
 	s.dispatcher.Dispatch(s.id, s.webhookURL, webhook.EventCallIncoming, map[string]any{
 		"call_id":   callID,
 		"from":      peerNum,
@@ -843,9 +853,19 @@ func (s *Session) handleIncomingCallOffer(ctx context.Context, evt *events.CallO
 func (s *Session) AcceptCall(ctx context.Context, callID string) error {
 	s.mu.RLock()
 	c, ok := s.calls[callID]
+	if !ok {
+		for _, call := range s.calls {
+			if call.Status == CallStatusRinging || call.Status == CallStatusInitiating || callID == "" || callID == "latest" {
+				c = call
+				ok = true
+				callID = call.CallID
+				break
+			}
+		}
+	}
 	s.mu.RUnlock()
-	if !ok || c.cm == nil {
-		return errors.New("call not found")
+	if !ok || c == nil || c.cm == nil {
+		return fmt.Errorf("no incoming call found with id %s", callID)
 	}
 	return c.cm.AcceptCall(ctx, callID)
 }
@@ -853,9 +873,19 @@ func (s *Session) AcceptCall(ctx context.Context, callID string) error {
 func (s *Session) RejectCall(ctx context.Context, callID string) error {
 	s.mu.RLock()
 	c, ok := s.calls[callID]
+	if !ok {
+		for _, call := range s.calls {
+			if call.Status == CallStatusRinging || callID == "" || callID == "latest" {
+				c = call
+				ok = true
+				callID = call.CallID
+				break
+			}
+		}
+	}
 	s.mu.RUnlock()
-	if !ok || c.cm == nil {
-		return errors.New("call not found")
+	if !ok || c == nil || c.cm == nil {
+		return fmt.Errorf("no call found with id %s", callID)
 	}
 	err := c.cm.RejectCall(ctx, callID, core.EndCallReasonDeclined)
 	s.removeCall(callID)
@@ -865,9 +895,19 @@ func (s *Session) RejectCall(ctx context.Context, callID string) error {
 func (s *Session) EndCall(callID string) error {
 	s.mu.RLock()
 	c, ok := s.calls[callID]
+	if !ok {
+		for _, call := range s.calls {
+			if callID == "" || callID == "latest" {
+				c = call
+				ok = true
+				callID = call.CallID
+				break
+			}
+		}
+	}
 	s.mu.RUnlock()
-	if !ok || c.cm == nil {
-		return errors.New("call not found")
+	if !ok || c == nil || c.cm == nil {
+		return fmt.Errorf("no call found with id %s", callID)
 	}
 	_ = c.cm.EndCall(context.Background(), core.EndCallReasonUserEnded)
 	s.removeCall(callID)
