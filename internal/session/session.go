@@ -812,8 +812,15 @@ func (s *Session) handleIncomingCallOffer(ctx context.Context, evt *events.CallO
 		return
 	}
 
-	peer := evt.From.ToNonAD()
-	peerNum := s.store.CleanLID(peer.String())
+	peerNum := s.store.CleanLID(evt.From.String())
+
+	s.log.Info("INCOMING CALL OFFER RECEIVED",
+		"session_id", s.id,
+		"call_id", callID,
+		"from_jid", evt.From.String(),
+		"peer_num", peerNum,
+		"raw_xml", node.String(),
+	)
 
 	s.mu.RLock()
 	activeCount := len(s.calls)
@@ -824,7 +831,7 @@ func (s *Session) handleIncomingCallOffer(ctx context.Context, evt *events.CallO
 		return
 	}
 
-	callCtx := s.createCallContext(callID, "inbound", peer)
+	callCtx := s.createCallContext(callID, "inbound", evt.From)
 	callCtx.Status = CallStatusRinging
 
 	_ = s.store.InsertCall(ctx, store.CallRecord{
@@ -837,7 +844,7 @@ func (s *Session) handleIncomingCallOffer(ctx context.Context, evt *events.CallO
 		StartedAt:       callCtx.StartedAt,
 	})
 
-	// Pass incoming call offer to CallManager so currentCall is populated and receipt/preaccept stanzas are handled
+	// Pass incoming call offer to CallManager so currentCall is populated with exact JIDs
 	if callCtx.cm != nil {
 		callCtx.cm.HandleCallOffer(ctx, node, evt.From)
 	}
@@ -845,7 +852,7 @@ func (s *Session) handleIncomingCallOffer(ctx context.Context, evt *events.CallO
 	s.dispatcher.Dispatch(s.id, s.webhookURL, webhook.EventCallIncoming, map[string]any{
 		"call_id":   callID,
 		"from":      peerNum,
-		"from_jid":  peer.String(),
+		"from_jid":  evt.From.String(),
 		"timestamp": time.Now().Unix(),
 	})
 }
