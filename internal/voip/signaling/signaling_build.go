@@ -123,9 +123,13 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "vp8"}})
 	}
 
+	targetTo := ensureTargetPeer(peerJid, callCreator)
+	if targetTo.IsEmpty() {
+		targetTo = wanode.MustJID(wanode.CleanJID(peerJid.String()))
+	}
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": peerJid.ToNonAD(), "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": targetTo, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag:     "accept",
 			Attrs:   waBinary.Attrs{"call-id": callID, "call-creator": callCreator},

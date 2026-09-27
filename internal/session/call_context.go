@@ -182,6 +182,9 @@ func (c *CallContext) StopAudioPlayback() {
 		c.playCancel()
 		c.playCancel = nil
 	}
+	if c.cm != nil {
+		c.cm.FlushCapturedPCM()
+	}
 }
 
 func (c *CallContext) IsPlaying() bool {

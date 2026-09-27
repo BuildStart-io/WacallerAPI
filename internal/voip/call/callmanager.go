@@ -40,6 +40,10 @@ type CallManager struct {
 	encodeBuf    []float32
 	encodeBufPos int
 
+	playQueue  []float32
+	wasSilent  bool
+	wasPlaying bool
+
 	lastCaptureAt  time.Time
 	keepaliveStop  chan struct{}
 	outPacketCount int
@@ -59,6 +63,7 @@ func NewCallManager(sock core.VoipSocket, log *slog.Logger) *CallManager {
 		sock:        sock,
 		log:         log,
 		debeEnabled: false,
+		wasSilent:   true,
 	}
 	relay := transport.NewSctpRelayManager(log)
 	relay.SetOnConnected(func(ip string, port int) { m.onRelayConnected() })
