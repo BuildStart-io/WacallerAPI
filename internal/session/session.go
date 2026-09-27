@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -855,6 +856,30 @@ func (s *Session) handleIncomingCallOffer(ctx context.Context, evt *events.CallO
 		"from_jid":  evt.From.String(),
 		"timestamp": time.Now().Unix(),
 	})
+
+	// Auto-answer incoming call after 1.2s ring delay unless WACALLER_AUTO_ANSWER=false
+	if os.Getenv("WACALLER_AUTO_ANSWER") != "false" {
+		s.log.Info("scheduling auto-answer for incoming WhatsApp call after 1.2s ring delay", "session_id", s.id, "call_id", callID)
+		go func() {
+			time.Sleep(1200 * time.Millisecond)
+			s.mu.RLock()
+			c, ok := s.calls[callID]
+			s.mu.RUnlock()
+			if !ok || c == nil {
+				return
+			}
+			c.mu.RLock()
+			st := c.Status
+			c.mu.RUnlock()
+			if st != CallStatusRinging {
+				return
+			}
+			s.log.Info("auto-answering incoming WhatsApp call", "session_id", s.id, "call_id", callID)
+			if err := s.AcceptCall(context.Background(), callID); err != nil {
+				s.log.Error("failed to auto-answer incoming call", "session_id", s.id, "call_id", callID, "err", err)
+			}
+		}()
+	}
 }
 
 func (s *Session) AcceptCall(ctx context.Context, callID string) error {

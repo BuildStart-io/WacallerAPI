@@ -178,7 +178,7 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 
 		transport := waBinary.Node{
 			Tag:   "call",
-			Attrs: waBinary.Attrs{"to": peer, "id": signaling.GenerateCallStanzaID()},
+			Attrs: waBinary.Attrs{"to": targetPeer, "id": signaling.GenerateCallStanzaID()},
 			Content: []waBinary.Node{{
 				Tag: "transport",
 				Attrs: waBinary.Attrs{
@@ -189,7 +189,7 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 			}},
 		}
 		_ = m.sock.SendNode(ctx, transport)
-		_ = m.sock.SendNode(ctx, signaling.BuildMuteV2Stanza(peer, callID, creator, 0))
+		_ = m.sock.SendNode(ctx, signaling.BuildMuteV2Stanza(targetPeer, callID, creator, 0))
 
 		if relayData != nil && len(relayData.Endpoints) > 0 {
 			var entries []signaling.RelayLatencyEntry
@@ -204,7 +204,7 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 					AddressBytes: ep.AddressBytes,
 				})
 			}
-			_ = m.sock.SendNode(ctx, signaling.BuildRelayLatencyStanza(peer, callID, creator, entries, nil))
+			_ = m.sock.SendNode(ctx, signaling.BuildRelayLatencyStanza(targetPeer, callID, creator, entries, nil))
 		}
 	}
 
