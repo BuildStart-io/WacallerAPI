@@ -73,7 +73,7 @@ func NewAgentSession(sessionID, callID, secret string, provider CallProvider, lo
 		provider:      provider,
 		log:           log.With("session_id", sessionID, "call_id", callID),
 		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout: 60 * time.Second,
 		},
 	}
 }
