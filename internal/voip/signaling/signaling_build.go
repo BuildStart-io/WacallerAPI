@@ -89,27 +89,15 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 	}
 	_ = sock.AssertSessions(ctx, rawDevices, false)
 
-	// Select active companion phone device JID (Device != 0) from rawDevices
-	var activeDeviceJID types.JID
-	for _, dev := range rawDevices {
-		if dev.User == peerJid.User && dev.Device != 0 {
-			activeDeviceJID = dev
-			break
-		}
-	}
-	if activeDeviceJID.IsEmpty() {
-		activeDeviceJID = target
-	}
-
 	nodes, includeDeviceIdentity, err := sock.CreateParticipantNodes(ctx, rawDevices, callKey, waBinary.Attrs{"count": "0"})
-	if err != nil || len(nodes) == 0 {
-		nodes, includeDeviceIdentity, err = sock.CreateParticipantNodes(ctx, []types.JID{activeDeviceJID}, callKey, waBinary.Attrs{"count": "0"})
-		if err != nil || len(nodes) == 0 {
-			return waBinary.Node{}, fmt.Errorf("encrypt accept failed: %w", err)
+	if err != nil {
+		nodes, includeDeviceIdentity, err = sock.CreateParticipantNodes(ctx, []types.JID{target}, callKey, waBinary.Attrs{"count": "0"})
+		if err != nil {
+			return waBinary.Node{}, fmt.Errorf("encrypt accept: %w", err)
 		}
 	}
 
-	encNode := extractEncFromParticipant(nodes, activeDeviceJID)
+	encNode := extractEncFromParticipant(nodes)
 	if encNode == nil {
 		return waBinary.Node{}, fmt.Errorf("no enc node produced for accept")
 	}
@@ -130,7 +118,7 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "vp8"}})
 	}
 
-	targetTo := activeDeviceJID
+	targetTo := wanode.MustJID(wanode.CleanJID(target.String()))
 	if targetTo.IsEmpty() {
 		targetTo = wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	}
@@ -145,86 +133,17 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 	}, nil
 }
 
-func extractEncFromParticipant(nodes []waBinary.Node, targetJID types.JID) *waBinary.Node {
-	// Pass 1: Prioritize prekey message (pkmsg) for active companion phone device (Device != 0)
-	for _, n := range nodes {
-		if jid, ok := getJIDFromParticipantNode(n); ok && jid.Device != 0 {
-			if enc := getEncNode(n); enc != nil && wanode.AttrString(enc.Attrs, "type") == "pkmsg" {
-				return enc
-			}
-		}
-	}
-
-	// Pass 2: match exact active device JID or companion phone device (Device != 0)
+func extractEncFromParticipant(nodes []waBinary.Node) *waBinary.Node {
 	for _, n := range nodes {
 		n := n
-		if jid, ok := getJIDFromParticipantNode(n); ok {
-			if jid.User == targetJID.User && jid.Server == targetJID.Server {
-				if targetJID.Device != 0 && jid.Device == targetJID.Device {
-					if enc := getEncNode(n); enc != nil {
-						return enc
-					}
-				}
-				if targetJID.Device == 0 && jid.Device != 0 {
-					if enc := getEncNode(n); enc != nil {
-						return enc
-					}
-				}
+		if n.Tag == "enc" {
+			return &n
+		}
+		for _, c := range wanode.NodeChildren(&n) {
+			c := c
+			if c.Tag == "enc" {
+				return &c
 			}
-		}
-	}
-
-	// Pass 2: match base user identity (Device == 0)
-	for _, n := range nodes {
-		n := n
-		if jid, ok := getJIDFromParticipantNode(n); ok {
-			if jid.User == targetJID.User && jid.Server == targetJID.Server {
-				if enc := getEncNode(n); enc != nil {
-					return enc
-				}
-			}
-		}
-	}
-
-	// Pass 3: return first enc node found
-	for _, n := range nodes {
-		if enc := getEncNode(n); enc != nil {
-			return enc
-		}
-	}
-	return nil
-}
-
-func getJIDFromParticipantNode(n waBinary.Node) (types.JID, bool) {
-	if jid, ok := n.Attrs["jid"].(types.JID); ok {
-		return jid, true
-	}
-	if str, ok := n.Attrs["jid"].(string); ok {
-		if parsed, err := types.ParseJID(str); err == nil {
-			return parsed, true
-		}
-	}
-	for _, c := range wanode.NodeChildren(&n) {
-		if jid, ok := c.Attrs["jid"].(types.JID); ok {
-			return jid, true
-		}
-		if str, ok := c.Attrs["jid"].(string); ok {
-			if parsed, err := types.ParseJID(str); err == nil {
-				return parsed, true
-			}
-		}
-	}
-	return types.EmptyJID, false
-}
-
-func getEncNode(n waBinary.Node) *waBinary.Node {
-	if n.Tag == "enc" {
-		return &n
-	}
-	for _, c := range wanode.NodeChildren(&n) {
-		c := c
-		if c.Tag == "enc" {
-			return &c
 		}
 	}
 	return nil
@@ -245,9 +164,10 @@ func BuildRejectStanza(peerJid types.JID, callID string, callCreator types.JID) 
 }
 
 func BuildPreacceptStanza(peerJid types.JID, callID string, callCreator types.JID) waBinary.Node {
+	cleanPeer := wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": peerJid, "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag:   "preaccept",
 			Attrs: waBinary.Attrs{"call-id": callID, "call-creator": callCreator},
@@ -321,9 +241,10 @@ func BuildTransportStanza(peerJid types.JID, callID string, callCreator types.JI
 }
 
 func BuildTransportReplyStanza(peerJid types.JID, callID string, callCreator types.JID) waBinary.Node {
+	cleanPeer := wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": peerJid, "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag: "transport",
 			Attrs: waBinary.Attrs{
@@ -337,9 +258,10 @@ func BuildTransportReplyStanza(peerJid types.JID, callID string, callCreator typ
 }
 
 func BuildMuteV2Stanza(peerDeviceJid types.JID, callID string, callCreator types.JID, muteState int) waBinary.Node {
+	cleanPeer := wanode.MustJID(wanode.CleanJID(peerDeviceJid.String()))
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": peerDeviceJid, "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag: "mute_v2",
 			Attrs: waBinary.Attrs{
@@ -362,9 +284,10 @@ func BuildAcceptReceiptStanza(peerDeviceJid types.JID, acceptMsgID, callID strin
 }
 
 func callWrap(to types.JID, inner waBinary.Node) waBinary.Node {
+	cleanTo := wanode.MustJID(wanode.CleanJID(to.String()))
 	return waBinary.Node{
 		Tag:     "call",
-		Attrs:   waBinary.Attrs{"to": to, "id": GenerateCallStanzaID()},
+		Attrs:   waBinary.Attrs{"to": cleanTo, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{inner},
 	}
 }

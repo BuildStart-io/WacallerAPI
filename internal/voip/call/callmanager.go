@@ -170,15 +170,16 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		if err != nil {
 			m.log.Error("build accept failed", "err", err)
 		} else {
-			m.log.Info("accept raw node", "xml", acceptNode.String(), "to", peer.String())
+			m.log.Info("accept raw node", "xml", acceptNode.String())
 			if err := m.sock.SendNode(ctx, acceptNode); err != nil {
 				m.log.Error("accept send error", "err", err)
 			}
 		}
 
+		cleanPeer := wanode.MustJID(wanode.CleanJID(peer.String()))
 		transport := waBinary.Node{
 			Tag:   "call",
-			Attrs: waBinary.Attrs{"to": targetPeer, "id": signaling.GenerateCallStanzaID()},
+			Attrs: waBinary.Attrs{"to": cleanPeer, "id": signaling.GenerateCallStanzaID()},
 			Content: []waBinary.Node{{
 				Tag: "transport",
 				Attrs: waBinary.Attrs{
@@ -189,7 +190,7 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 			}},
 		}
 		_ = m.sock.SendNode(ctx, transport)
-		_ = m.sock.SendNode(ctx, signaling.BuildMuteV2Stanza(targetPeer, callID, creator, 0))
+		_ = m.sock.SendNode(ctx, signaling.BuildMuteV2Stanza(cleanPeer, callID, creator, 0))
 
 		if relayData != nil && len(relayData.Endpoints) > 0 {
 			var entries []signaling.RelayLatencyEntry
@@ -204,7 +205,7 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 					AddressBytes: ep.AddressBytes,
 				})
 			}
-			_ = m.sock.SendNode(ctx, signaling.BuildRelayLatencyStanza(targetPeer, callID, creator, entries, nil))
+			_ = m.sock.SendNode(ctx, signaling.BuildRelayLatencyStanza(cleanPeer, callID, creator, entries, nil))
 		}
 	}
 
@@ -212,18 +213,18 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		m.setupIncomingMedia(call, relayData)
 	}
 
-	if relayData != nil && !m.relay.HasConnection() {
+	if m.relay.HasConnection() {
+		m.mu.Lock()
+		if err := call.ApplyTransition(Transition{Type: TransitionMediaConnected}); err == nil {
+			m.emitState()
+			m.startSilenceKeepaliveLocked()
+			m.log.Info("call ACTIVE (media path established)", "call_id", callID, "audio", m.codec != nil)
+		}
+		m.mu.Unlock()
+		m.relay.ResendSubscriptions()
+	} else if relayData != nil {
 		m.connectRelays(relayData.Endpoints)
 	}
-
-	m.mu.Lock()
-	m.startSilenceKeepaliveLocked()
-	m.mu.Unlock()
-	if m.relay.HasConnection() {
-		m.relay.ResendSubscriptions()
-	}
-
-	m.log.Info("call accepted (waiting for caller answer/media confirmation)", "call_id", callID)
 	return nil
 }
 

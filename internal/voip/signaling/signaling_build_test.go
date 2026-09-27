@@ -10,7 +10,6 @@ import (
 func TestExtractEncFromParticipant(t *testing.T) {
 	device0JID, _ := types.ParseJID("169939356889212:0@lid")
 	device15JID, _ := types.ParseJID("169939356889212:15@lid")
-	baseJID, _ := types.ParseJID("169939356889212@lid")
 
 	nodes := []waBinary.Node{
 		{
@@ -29,20 +28,11 @@ func TestExtractEncFromParticipant(t *testing.T) {
 		},
 	}
 
-	enc15 := extractEncFromParticipant(nodes, device15JID)
-	if enc15 == nil {
-		t.Fatalf("expected enc node for device 15, got nil")
+	enc := extractEncFromParticipant(nodes)
+	if enc == nil {
+		t.Fatalf("expected enc node, got nil")
 	}
-	if string(enc15.Content.([]byte)) != "enc_for_device_15" {
-		t.Errorf("got content %q, want enc_for_device_15", string(enc15.Content.([]byte)))
-	}
-
-	// Base JID query should prefer companion phone device 15 over device 0
-	encBase := extractEncFromParticipant(nodes, baseJID)
-	if encBase == nil {
-		t.Fatalf("expected enc node for base JID, got nil")
-	}
-	if string(encBase.Content.([]byte)) != "enc_for_device_15" {
-		t.Errorf("got content %q, want enc_for_device_15", string(encBase.Content.([]byte)))
+	if string(enc.Content.([]byte)) != "enc_for_device_0" {
+		t.Errorf("got content %q, want enc_for_device_0", string(enc.Content.([]byte)))
 	}
 }
