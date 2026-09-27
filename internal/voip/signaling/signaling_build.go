@@ -89,15 +89,27 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 	}
 	_ = sock.AssertSessions(ctx, rawDevices, false)
 
+	// Select active companion phone device JID (Device != 0) from rawDevices
+	var activeDeviceJID types.JID
+	for _, dev := range rawDevices {
+		if dev.User == peerJid.User && dev.Device != 0 {
+			activeDeviceJID = dev
+			break
+		}
+	}
+	if activeDeviceJID.IsEmpty() {
+		activeDeviceJID = target
+	}
+
 	nodes, includeDeviceIdentity, err := sock.CreateParticipantNodes(ctx, rawDevices, callKey, waBinary.Attrs{"count": "0"})
 	if err != nil || len(nodes) == 0 {
-		nodes, includeDeviceIdentity, err = sock.CreateParticipantNodes(ctx, []types.JID{target}, callKey, waBinary.Attrs{"count": "0"})
+		nodes, includeDeviceIdentity, err = sock.CreateParticipantNodes(ctx, []types.JID{activeDeviceJID}, callKey, waBinary.Attrs{"count": "0"})
 		if err != nil || len(nodes) == 0 {
 			return waBinary.Node{}, fmt.Errorf("encrypt accept failed: %w", err)
 		}
 	}
 
-	encNode := extractEncFromParticipant(nodes, peerJid)
+	encNode := extractEncFromParticipant(nodes, activeDeviceJID)
 	if encNode == nil {
 		return waBinary.Node{}, fmt.Errorf("no enc node produced for accept")
 	}
@@ -118,7 +130,7 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "vp8"}})
 	}
 
-	targetTo := target
+	targetTo := activeDeviceJID
 	if targetTo.IsEmpty() {
 		targetTo = wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	}
@@ -134,7 +146,16 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 }
 
 func extractEncFromParticipant(nodes []waBinary.Node, targetJID types.JID) *waBinary.Node {
-	// Pass 1: match exact active device JID or companion phone device (Device != 0)
+	// Pass 1: Prioritize prekey message (pkmsg) for active companion phone device (Device != 0)
+	for _, n := range nodes {
+		if jid, ok := getJIDFromParticipantNode(n); ok && jid.Device != 0 {
+			if enc := getEncNode(n); enc != nil && wanode.AttrString(enc.Attrs, "type") == "pkmsg" {
+				return enc
+			}
+		}
+	}
+
+	// Pass 2: match exact active device JID or companion phone device (Device != 0)
 	for _, n := range nodes {
 		n := n
 		if jid, ok := getJIDFromParticipantNode(n); ok {
