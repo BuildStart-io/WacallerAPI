@@ -231,7 +231,7 @@ func (s *Session) PairPhone(ctx context.Context, phone string) (string, error) {
 			return "", fmt.Errorf("connect failed: %w", err)
 		}
 	}
-	code, err := s.client.PairPhone(ctx, phone, true, whatsmeow.PairClientChrome, "Chrome (Mac OS)")
+	code, err := s.client.PairPhone(ctx, phone, true, whatsmeow.PairClientMacOS, "Mac OS Desktop")
 	if err != nil {
 		return "", err
 	}

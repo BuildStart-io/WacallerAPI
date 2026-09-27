@@ -26,7 +26,7 @@ import (
 )
 
 func init() {
-	waStore.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
+	waStore.DeviceProps.PlatformType = waCompanionReg.DeviceProps_DESKTOP.Enum()
 	waStore.DeviceProps.Os = proto.String("Mac OS")
 	waStore.DeviceProps.RequireFullSync = proto.Bool(false)
 	if waStore.DeviceProps.HistorySyncConfig != nil {
