@@ -81,24 +81,20 @@ func ensureTargetPeer(peerJid, callCreator types.JID) types.JID {
 }
 
 func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid, callCreator types.JID, isVideo bool) (waBinary.Node, error) {
-	lookupJIDs := []types.JID{peerJid.ToNonAD()}
-	if !callCreator.IsEmpty() && callCreator.ToNonAD() != peerJid.ToNonAD() {
-		lookupJIDs = append(lookupJIDs, callCreator.ToNonAD())
-	}
+	target := ensureTargetPeer(peerJid, callCreator)
 
-	rawDevices, err := sock.GetUSyncDevices(ctx, lookupJIDs)
+	rawDevices, err := sock.GetUSyncDevices(ctx, []types.JID{target, callCreator})
 	if err != nil || len(rawDevices) == 0 {
-		rawDevices = []types.JID{peerJid}
-		if !callCreator.IsEmpty() && callCreator != peerJid {
-			rawDevices = append(rawDevices, callCreator)
-		}
+		rawDevices = []types.JID{target}
 	}
-
 	_ = sock.AssertSessions(ctx, rawDevices, false)
 
 	nodes, includeDeviceIdentity, err := sock.CreateParticipantNodes(ctx, rawDevices, callKey, waBinary.Attrs{"count": "0"})
 	if err != nil || len(nodes) == 0 {
-		return waBinary.Node{}, fmt.Errorf("encrypt accept failed: %w", err)
+		nodes, includeDeviceIdentity, err = sock.CreateParticipantNodes(ctx, []types.JID{target}, callKey, waBinary.Attrs{"count": "0"})
+		if err != nil || len(nodes) == 0 {
+			return waBinary.Node{}, fmt.Errorf("encrypt accept failed: %w", err)
+		}
 	}
 
 	encNode := extractEncFromParticipant(nodes, peerJid)
@@ -111,7 +107,6 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		{Tag: "net", Attrs: waBinary.Attrs{"medium": "2"}},
 		{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
 		{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityOffer},
-		{Tag: "destination", Content: nodes},
 		*encNode,
 	}
 	if includeDeviceIdentity {
@@ -123,7 +118,7 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "vp8"}})
 	}
 
-	targetTo := ensureTargetPeer(peerJid, callCreator)
+	targetTo := target
 	if targetTo.IsEmpty() {
 		targetTo = wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	}
