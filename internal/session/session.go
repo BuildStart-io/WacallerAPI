@@ -38,28 +38,31 @@ type Session struct {
 	log        *slog.Logger
 	maxCalls   int
 
-	mu         sync.RWMutex
-	status     SessionStatus
-	connecting bool
-	currentQR  string
-	webhookURL string
-	calls      map[string]*CallContext
+	mu             sync.RWMutex
+	status         SessionStatus
+	connecting     bool
+	currentQR      string
+	webhookURL     string
+	calls          map[string]*CallContext
+	lastCallbackMu sync.Mutex
+	lastCallbacks  map[string]time.Time
 }
 
 func newSession(id, name, apiKey string, client *whatsmeow.Client, st *store.Store, disp *webhook.Dispatcher, log *slog.Logger, maxCalls int, webhookURL, userID string) *Session {
 	s := &Session{
-		id:         id,
-		name:       name,
-		userID:     userID,
-		apiKey:     apiKey,
-		client:     client,
-		store:      st,
-		dispatcher: disp,
-		log:        log.With("session_id", id),
-		maxCalls:   maxCalls,
-		status:     StatusDisconnected,
-		webhookURL: webhookURL,
-		calls:      make(map[string]*CallContext),
+		id:            id,
+		name:          name,
+		userID:        userID,
+		apiKey:        apiKey,
+		client:        client,
+		store:         st,
+		dispatcher:    disp,
+		log:           log.With("session_id", id),
+		maxCalls:      maxCalls,
+		status:        StatusDisconnected,
+		webhookURL:    webhookURL,
+		calls:         make(map[string]*CallContext),
+		lastCallbacks: make(map[string]time.Time),
 	}
 
 	client.AddEventHandler(s.handleEvent)
@@ -312,6 +315,14 @@ func (s *Session) handleEvent(rawEvt any) {
 	case *events.CallOffer:
 		s.handleIncomingCallOffer(ctx, evt)
 
+	case *events.CallOfferNotice:
+		s.log.Info("call offer notice received (offline/missed call)", "from", evt.From, "creator", evt.CallCreator)
+		peer := evt.CallCreator
+		if peer.IsEmpty() {
+			peer = evt.From
+		}
+		s.scheduleAutoCallback(ctx, peer, "call_offer_notice")
+
 	case *events.CallAccept:
 		if c := s.callForNode(evt.From, evt.Data); c != nil && c.cm != nil {
 			c.cm.HandleCallAccept(ctx, wrapCall(evt.From, evt.Data), evt.From)
@@ -324,7 +335,12 @@ func (s *Session) handleEvent(rawEvt any) {
 
 	case *events.CallTerminate:
 		if c := s.callForNode(evt.From, evt.Data); c != nil && c.cm != nil {
+			isTrulyAnswered := c.Status == CallStatusActive
 			c.cm.HandleCallTerminate(wrapCall(evt.From, evt.Data), evt.From)
+			if !isTrulyAnswered && c.Direction == "inbound" {
+				s.log.Info("inbound call ended without answer, scheduling auto-callback", "peer", evt.From.String())
+				s.scheduleAutoCallback(ctx, evt.From, "unanswered_inbound_call")
+			}
 		}
 
 	case *events.CallReject:
@@ -339,6 +355,19 @@ func (s *Session) handleEvent(rawEvt any) {
 func (s *Session) handleIncomingMessage(evt *events.Message) {
 	if evt.Message == nil || evt.Info.IsFromMe {
 		return
+	}
+
+	// Keyword trigger check for instant callback request
+	text := strings.TrimSpace(strings.ToLower(evt.Message.GetConversation()))
+	if text == "" && evt.Message.GetExtendedTextMessage() != nil {
+		text = strings.TrimSpace(strings.ToLower(evt.Message.GetExtendedTextMessage().GetText()))
+	}
+	if text != "" {
+		if text == "call" || text == "call me" || text == "callback" || text == "call back" ||
+			strings.Contains(text, "call me") || strings.Contains(text, "කතා කරන්න") || strings.Contains(text, "call කරන්න") {
+			s.log.Info("call request keyword received in chat", "sender", evt.Info.Sender, "text", text)
+			s.scheduleAutoCallback(context.Background(), evt.Info.Sender.ToNonAD(), "text_trigger: "+text)
+		}
 	}
 
 	sender := evt.Info.Sender.ToNonAD().String()
@@ -1027,4 +1056,71 @@ func callIDFromNode(node *waBinary.Node) string {
 		return ""
 	}
 	return info.CallID
+}
+
+func (s *Session) scheduleAutoCallback(ctx context.Context, peer types.JID, reason string) {
+	if peer.IsEmpty() {
+		return
+	}
+	if s.client != nil && s.client.Store != nil && s.client.Store.ID != nil && peer.User == s.client.Store.ID.User {
+		return
+	}
+
+	peerStr := peer.ToNonAD().String()
+	s.lastCallbackMu.Lock()
+	if s.lastCallbacks == nil {
+		s.lastCallbacks = make(map[string]time.Time)
+	}
+	last, exists := s.lastCallbacks[peerStr]
+	if exists && time.Since(last) < 2*time.Minute {
+		s.lastCallbackMu.Unlock()
+		s.log.Debug("auto-callback debounced (called recently)", "peer", peerStr, "reason", reason)
+		return
+	}
+	s.lastCallbacks[peerStr] = time.Now()
+	s.lastCallbackMu.Unlock()
+
+	s.log.Info("scheduling instant AI auto-callback", "peer", peerStr, "reason", reason)
+
+	// 1. Send immediate WhatsApp text notification
+	go func() {
+		msgText := "Hello! We saw that you just tried to call. Our AI voice assistant will call you back right away."
+		msg := &waE2E.Message{
+			Conversation: proto.String(msgText),
+		}
+		if s.client != nil && s.client.IsConnected() {
+			_, err := s.client.SendMessage(context.Background(), peer.ToNonAD(), msg)
+			if err != nil {
+				s.log.Warn("failed to send auto-callback text notification", "peer", peerStr, "err", err)
+			} else {
+				s.log.Info("sent auto-callback text notification to caller", "peer", peerStr)
+			}
+		}
+	}()
+
+	// 2. Schedule outbound call after 4.0s idle buffer
+	go func() {
+		time.Sleep(4000 * time.Millisecond)
+
+		// Check if we already have an active call with this peer
+		s.mu.RLock()
+		for _, c := range s.calls {
+			if c != nil && c.Status == CallStatusActive && strings.Contains(c.PeerJID.User, peer.User) {
+				s.mu.RUnlock()
+				s.log.Info("skipping auto-callback, call already active with peer", "peer", peerStr)
+				return
+			}
+		}
+		s.mu.RUnlock()
+
+		callCtx, err := s.StartCall(context.Background(), DialOptions{
+			To:      peerStr,
+			IsVideo: false,
+		})
+		if err != nil {
+			s.log.Error("failed to start auto-callback", "peer", peerStr, "err", err)
+			return
+		}
+		s.log.Info("auto-callback placed successfully", "call_id", callCtx.CallID, "peer", peerStr)
+	}()
 }
