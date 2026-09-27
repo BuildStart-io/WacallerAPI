@@ -118,7 +118,7 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "vp8"}})
 	}
 
-	targetTo := wanode.MustJID(wanode.CleanJID(target.String()))
+	targetTo := target
 	if targetTo.IsEmpty() {
 		targetTo = wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	}
