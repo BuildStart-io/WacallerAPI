@@ -29,6 +29,7 @@ type CallInfo struct {
 	GroupJid        string
 	IsOffline         bool
 	CallerPn          string
+	OfferMsgID        string
 	EncryptionKey     []byte
 	PeerEncryptionKey []byte
 	RelayData         *core.RelayData

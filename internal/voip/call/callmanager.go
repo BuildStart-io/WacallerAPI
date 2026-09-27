@@ -163,6 +163,7 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	}
 	isVideo := call.MediaType == core.CallMediaTypeVideo
 	relayData := call.RelayData
+	offerMsgID := call.OfferMsgID
 	m.mu.Unlock()
 
 	if key != nil {
@@ -191,6 +192,16 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		}
 		_ = m.sock.SendNode(ctx, transport)
 		_ = m.sock.SendNode(ctx, signaling.BuildMuteV2Stanza(cleanPeer, callID, creator, 0))
+
+		if offerMsgID != "" {
+			ourJid := m.sock.OwnLID()
+			if ourJid.IsEmpty() {
+				ourJid = m.sock.OwnPN()
+			}
+			receiptStanza := signaling.BuildAcceptReceiptStanza(targetPeer, offerMsgID, callID, creator, ourJid)
+			m.log.Info("sending accept receipt stanza", "xml", receiptStanza.String())
+			_ = m.sock.SendNode(ctx, receiptStanza)
+		}
 
 		if relayData != nil && len(relayData.Endpoints) > 0 {
 			var entries []signaling.RelayLatencyEntry

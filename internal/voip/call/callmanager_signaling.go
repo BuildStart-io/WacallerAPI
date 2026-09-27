@@ -102,6 +102,11 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 		offerMsgID = wanode.AttrString(info.InnerNode.Attrs, "id")
 	}
 	if offerMsgID != "" {
+		m.mu.Lock()
+		if m.currentCall != nil {
+			m.currentCall.OfferMsgID = offerMsgID
+		}
+		m.mu.Unlock()
 		_ = m.sock.SendNode(ctx, waBinary.Node{
 			Tag:   "receipt",
 			Attrs: waBinary.Attrs{"id": offerMsgID, "to": peerJid, "type": "offer", "t": fmt.Sprintf("%d", time.Now().Unix())},
